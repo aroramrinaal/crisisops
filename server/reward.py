@@ -5,10 +5,10 @@ from typing import Any
 
 try:
     from ..models import CrisisopsAction
-    from .rules import is_unsafe_action, unit_type_for_incident
+    from .rules import INCIDENT_UNIT_TYPES
 except ImportError:
     from models import CrisisopsAction
-    from server.rules import is_unsafe_action, unit_type_for_incident
+    from server.rules import INCIDENT_UNIT_TYPES
 
 
 def compute_step_reward(
@@ -17,88 +17,143 @@ def compute_step_reward(
     new_state: Mapping[str, Any],
     hidden_state: Mapping[str, Any],
 ) -> float:
-    """Return intentionally unbounded reward for one transition."""
+    """Return plan-aligned reward for one transition."""
 
     payload = _action_payload(action)
     action_type = payload.get("type")
-    reward = -0.02
-
-    if is_unsafe_action(payload, hidden_state):
-        reward -= 1.25
+    reward = -0.01
 
     if action_type == "verify_report":
         report_id = payload.get("report_id")
-        if hidden_state.get("report_truth", {}).get(report_id) is True:
-            reward += 0.45
-        else:
-            reward += 0.25
+        if _report_truth(report_id, hidden_state) is True:
+            reward += 0.05
 
     elif action_type == "flag_false_alarm":
         report_id = payload.get("report_id")
-        reward += 0.9 if hidden_state.get("report_truth", {}).get(report_id) is False else -1.1
+        reward += 0.05 if _report_truth(report_id, hidden_state) is False else -0.10
 
-    elif action_type == "request_recon":
-        zone_id = payload.get("zone_id")
-        reward += 0.35 if zone_id in hidden_state.get("incident_zones", []) else 0.05
-
-    elif action_type == "allocate_unit":
-        reward += _allocation_reward(payload, hidden_state)
+    elif action_type in {"allocate_unit", "issue_evacuation"}:
+        if _acts_on_unverified_non_sensor_report(payload, hidden_state):
+            reward -= 0.10
+        if action_type == "allocate_unit" and _wrong_unit_type(payload, hidden_state):
+            reward -= 0.15
 
     elif action_type == "reroute_unit":
         route = payload.get("route", {})
-        reward += 0.55 if route.get("status") in {"open", "congested"} else -0.8
-
-    elif action_type == "issue_evacuation":
-        reward += 0.75 if payload.get("zone_id") in hidden_state.get("incident_zones", []) else -0.9
-
-    elif action_type == "open_shelter":
-        shelter = payload.get("shelter", {})
-        reward += 0.5 if shelter.get("capacity_available", 0) > 0 else -0.5
-
-    elif action_type == "dispatch_supplies":
-        reward += 0.65 if payload.get("destination_zone_id") in hidden_state.get("incident_zones", []) else -0.35
-
-    elif action_type == "publish_sitrep":
-        payload_data = payload.get("payload", {})
-        reward += 0.15 * len(payload_data.get("verified_report_ids", []))
-        reward -= 0.1 * len(payload_data.get("pending_verification_report_ids", []))
+        if route.get("status") in {"blocked", "unsafe"}:
+            reward -= 0.20
 
     elif action_type == "noop":
-        pending_reports = _pending_reports(new_state, hidden_state)
-        reward += 0.2 if pending_reports else -0.15
+        if new_state.get("consecutive_noop_count", 0) > 2:
+            reward -= 0.02
 
-    reward += _progress_delta(prev_state, new_state)
+    if _targets_blocked_zone(payload, hidden_state):
+        reward -= 0.20
+    if _shelter_overfilled(payload, hidden_state):
+        reward -= 0.10
+
+    reward += 0.30 * len(
+        _new_resolved_before_deadline(prev_state, new_state, hidden_state)
+    )
+    reward -= 0.50 * len(_new_deadline_misses(prev_state, new_state))
     return float(reward)
 
 
-def _allocation_reward(payload: Mapping[str, Any], hidden_state: Mapping[str, Any]) -> float:
-    report_ids = payload.get("report_ids", [])
+def _wrong_unit_type(
+    payload: Mapping[str, Any], hidden_state: Mapping[str, Any]
+) -> bool:
+    units_by_id = hidden_state.get("units_by_id", {})
+    zones_by_id = hidden_state.get("zones_by_id", {})
+    unit = units_by_id.get(payload.get("unit_id"), {})
+    zone = zones_by_id.get(payload.get("zone_id"), {})
+    if not unit or not zone:
+        return False
+    return unit.get("unit_type") not in INCIDENT_UNIT_TYPES.get(
+        zone.get("incident_type"), set()
+    )
+
+
+def _report_truth(report_id: str | None, hidden_state: Mapping[str, Any]) -> bool | None:
+    if report_id is None:
+        return None
+    if report_id in hidden_state.get("report_truth", {}):
+        return hidden_state["report_truth"][report_id]
+    return hidden_state.get("event_report_truth", {}).get(report_id)
+
+
+def _acts_on_unverified_non_sensor_report(
+    payload: Mapping[str, Any], hidden_state: Mapping[str, Any]
+) -> bool:
+    verified = set(hidden_state.get("verified_report_ids", []))
     reports_by_id = hidden_state.get("reports_by_id", {})
-    for report_id in report_ids:
-        report = reports_by_id.get(report_id)
-        if not report:
-            continue
-        expected = unit_type_for_incident(report.get("report_type", "other"))
-        if hidden_state.get("report_truth", {}).get(report_id) and payload.get("task"):
-            return 1.0 if expected in {payload.get("task"), payload.get("unit_type")} else 0.55
-    return 0.25
+    report_ids = set(payload.get("report_ids", []))
+    if not report_ids and payload.get("zone_id"):
+        report_ids = {
+            report_id
+            for report_id, report in reports_by_id.items()
+            if report.get("zone_id") == payload.get("zone_id")
+        }
+    return any(
+        reports_by_id.get(report_id, {}).get("confidence") != "sensor_confirmed"
+        and report_id not in verified
+        for report_id in report_ids
+    )
 
 
-def _pending_reports(
-    state: Mapping[str, Any], hidden_state: Mapping[str, Any]
-) -> list[str]:
-    verified = set(state.get("verified_report_ids", hidden_state.get("verified_report_ids", [])))
-    report_truth = hidden_state.get("report_truth", {})
-    return [report_id for report_id in report_truth if report_id not in verified]
+def _targets_blocked_zone(
+    payload: Mapping[str, Any], hidden_state: Mapping[str, Any]
+) -> bool:
+    if payload.get("type") not in {
+        "allocate_unit",
+        "issue_evacuation",
+        "dispatch_supplies",
+    }:
+        return False
+    zone_id = payload.get("zone_id") or payload.get("destination_zone_id")
+    zone = hidden_state.get("zones_by_id", {}).get(zone_id, {})
+    return zone.get("access_status") == "blocked"
 
 
-def _progress_delta(prev_state: Mapping[str, Any], new_state: Mapping[str, Any]) -> float:
-    prev_allocations = len(prev_state.get("allocated_unit_ids", []))
-    new_allocations = len(new_state.get("allocated_unit_ids", []))
-    prev_verified = len(prev_state.get("verified_report_ids", []))
-    new_verified = len(new_state.get("verified_report_ids", []))
-    return 0.1 * (new_allocations - prev_allocations) + 0.05 * (
-        new_verified - prev_verified
+def _shelter_overfilled(
+    payload: Mapping[str, Any], hidden_state: Mapping[str, Any]
+) -> bool:
+    if payload.get("type") != "issue_evacuation":
+        return False
+    zone_id = payload.get("zone_id")
+    shelter_id = payload.get("destination_shelter_id")
+    if not zone_id or not shelter_id:
+        return False
+    zone = hidden_state.get("zones_by_id", {}).get(zone_id, {})
+    shelter = hidden_state.get("shelters_by_id", {}).get(shelter_id, {})
+    return bool(
+        zone
+        and shelter
+        and zone.get("population_at_risk", 0)
+        > shelter.get("capacity_available", 0)
+    )
+
+
+def _new_resolved_before_deadline(
+    prev_state: Mapping[str, Any],
+    new_state: Mapping[str, Any],
+    hidden_state: Mapping[str, Any],
+) -> set[str]:
+    prev_steps = set(prev_state.get("first_correct_allocation_steps", {}))
+    new_steps = dict(new_state.get("first_correct_allocation_steps", {}))
+    deadlines = hidden_state.get("zone_deadlines", {})
+    return {
+        zone_id
+        for zone_id in set(new_steps) - prev_steps
+        if new_steps[zone_id] < deadlines.get(zone_id, -1)
+        and zone_id in set(hidden_state.get("critical_zone_ids", []))
+    }
+
+
+def _new_deadline_misses(
+    prev_state: Mapping[str, Any], new_state: Mapping[str, Any]
+) -> set[str]:
+    return set(new_state.get("deadline_missed_zone_ids", [])) - set(
+        prev_state.get("deadline_missed_zone_ids", [])
     )
 
 

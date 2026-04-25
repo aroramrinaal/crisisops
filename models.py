@@ -9,12 +9,43 @@
 from typing import Annotated, Literal, Union
 
 from openenv.core.env_server.types import Action, Observation
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
 
 Priority = Literal["low", "normal", "high", "critical"]
 RiskLevel = Literal["unknown", "low", "moderate", "high", "critical"]
 VerificationStatus = Literal["unverified", "verified", "disputed", "false_alarm"]
+IncidentType = Literal[
+    "flood",
+    "collapse",
+    "medical_surge",
+    "fire",
+    "contamination",
+    "power_outage",
+]
+AccessStatus = Literal["clear", "degraded", "blocked"]
+PlanUnitType = Literal[
+    "rescue_team",
+    "medical_unit",
+    "supply_truck",
+    "evac_bus",
+    "recon_drone",
+]
+ReportConfidence = Literal[
+    "citizen",
+    "sensor_confirmed",
+    "official_unverified",
+]
+
+
+INCIDENT_REQUIRED_UNIT_TYPES: dict[str, set[str]] = {
+    "flood": {"rescue_team", "evac_bus"},
+    "collapse": {"rescue_team", "medical_unit"},
+    "medical_surge": {"medical_unit"},
+    "fire": {"rescue_team"},
+    "contamination": {"supply_truck", "medical_unit"},
+    "power_outage": {"supply_truck"},
+}
 
 
 class CrisisopsModel(BaseModel):
@@ -51,6 +82,13 @@ class Zone(CrisisopsModel):
 
     zone_id: str = Field(..., min_length=1)
     name: str | None = None
+    incident_type: IncidentType
+    severity: int = Field(..., ge=1, le=5)
+    population_at_risk: int = Field(..., ge=0)
+    deadline_steps: int = Field(..., ge=1)
+    access_status: AccessStatus = "clear"
+    required_unit_types: set[str] = Field(default_factory=set)
+    district_id: str | None = None
     risk_level: RiskLevel = "unknown"
     population_estimate: int | None = Field(default=None, ge=0)
     infrastructure_status: dict[
@@ -59,18 +97,33 @@ class Zone(CrisisopsModel):
     shelter: ShelterInfo | None = None
     routes: list[RouteInfo] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def derive_plan_fields(self) -> "Zone":
+        if not self.required_unit_types:
+            self.required_unit_types = set(
+                INCIDENT_REQUIRED_UNIT_TYPES[self.incident_type]
+            )
+        if self.risk_level == "unknown":
+            self.risk_level = _risk_for_severity(self.severity)
+        if self.population_estimate is None:
+            self.population_estimate = self.population_at_risk
+        return self
+
 
 class Unit(CrisisopsModel):
     """Limited response resource available to the commander."""
 
     unit_id: str = Field(..., min_length=1)
-    unit_type: Literal[
-        "medical", "fire", "rescue", "police", "supply", "recon", "transport"
-    ]
+    unit_type: PlanUnitType
     status: Literal["available", "assigned", "en_route", "blocked", "offline"]
     current_zone_id: str | None = None
+    travel_cost: int = Field(default=1, ge=0)
+    fatigue: int = Field(default=0, ge=0)
     capacity: int = Field(default=1, ge=0)
     capabilities: list[str] = Field(default_factory=list)
+    district_id: str | None = None
+    shared_pool: bool = False
+    mutual_aid_unlock_step: int | None = Field(default=None, ge=0)
 
 
 class Report(CrisisopsModel):
@@ -79,32 +132,23 @@ class Report(CrisisopsModel):
     report_id: str = Field(..., min_length=1)
     zone_id: str = Field(..., min_length=1)
     source: Literal["citizen", "sensor", "official", "field_team", "media"]
-    report_type: Literal[
-        "flood",
-        "fire",
-        "collapse",
-        "medical",
-        "infrastructure",
-        "shelter",
-        "resource",
-        "other",
-    ]
+    report_type: IncidentType
     severity: RiskLevel = "unknown"
     description: str = Field(..., min_length=1)
     verified_status: VerificationStatus = "unverified"
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: ReportConfidence = "citizen"
     time_step: int = Field(..., ge=0)
+    reveal_at_step: int = Field(default=0, ge=0)
 
 
 class SitrepPayload(CrisisopsModel):
     """Structured situation report payload for public or operator updates."""
 
-    summary: str = Field(..., min_length=1)
-    priorities: list[str] = Field(default_factory=list)
-    verified_report_ids: list[str] = Field(default_factory=list)
-    pending_verification_report_ids: list[str] = Field(default_factory=list)
-    allocations: list[str] = Field(default_factory=list)
-    next_actions: list[str] = Field(default_factory=list)
+    incidents_confirmed: list[str] = Field(default_factory=list)
+    incidents_resolved: list[str] = Field(default_factory=list)
+    unresolved_risks: list[str] = Field(default_factory=list)
+    false_alarms_detected: list[str] = Field(default_factory=list)
+    summary_text: str = Field(..., min_length=1)
 
 
 class VerifyReportAction(Action):
@@ -243,3 +287,13 @@ class CrisisopsObservation(Observation):
     time_step: int = Field(default=0, ge=0)
     incident_log: list[str] = Field(default_factory=list)
     session_id: str = Field(..., min_length=1)
+
+
+def _risk_for_severity(severity: int) -> RiskLevel:
+    if severity >= 5:
+        return "critical"
+    if severity == 4:
+        return "high"
+    if severity == 3:
+        return "moderate"
+    return "low"

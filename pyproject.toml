@@ -41,5 +41,5 @@ server = "crisisops.server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["crisisops", "crisisops.server"]
+packages = ["crisisops", "crisisops.server", "crisisops.server.scenarios"]
 package-dir = { "crisisops" = ".", "crisisops.server" = "server" }

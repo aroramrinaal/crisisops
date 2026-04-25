@@ -33,6 +33,7 @@ def generate_scenario(tier: str, seed: int):
         rng=rng,
         zones=zones,
         reports=reports,
+        units=units,
         report_truth=report_truth,
     )
     scenario = {

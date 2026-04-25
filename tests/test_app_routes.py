@@ -98,12 +98,11 @@ class TestAppRoutes:
                 "action": {
                     "type": "publish_sitrep",
                     "payload": {
-                        "summary": "Initial situation report.",
-                        "priorities": [],
-                        "verified_report_ids": [],
-                        "pending_verification_report_ids": [],
-                        "allocations": [],
-                        "next_actions": [],
+                        "incidents_confirmed": [],
+                        "incidents_resolved": [],
+                        "unresolved_risks": [],
+                        "false_alarms_detected": [],
+                        "summary_text": "Initial situation report.",
                     },
                 }
             },
