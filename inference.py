@@ -110,20 +110,60 @@ ACTION_JSON_RE = re.compile(r"\{[\s\S]*\}")
 SYSTEM_PROMPT = textwrap.dedent(
     """
     You are an emergency operations commander for CrisisOps. Return exactly one
-    JSON object for the next environment action. You are controlling a sequential
-    RL environment under partial observability. Use only visible observation
-    fields; do not invent report IDs, unit IDs, zone IDs, shelter IDs, or routes.
+    JSON object for the next environment action.
 
-    Planning guidance:
-    - Verify non-sensor reports before committing scarce units.
-    - Sensor-confirmed reports can support action without another verification.
-    - Flag reports only after they are disputed or already marked false_alarm.
-    - Allocate available units whose unit_type matches a zone's required_unit_types.
-    - Publish a sitrep only when you believe known urgent work is complete or the
-      episode is near its step limit.
-    - Return JSON only. No markdown fences. No explanation outside the JSON.
+    DEFAULT BEHAVIOR: copy the `Recommended action` block VERBATIM. The
+    deterministic policy that produced it already accounts for verification
+    status, unit-type matching, blocked zones, deadlines, and sitrep timing.
+    Deviate ONLY if the observation reveals something the recommendation
+    clearly missed (e.g. it suggests allocating to a zone that just turned
+    blocked). Do NOT replace allocate_unit with verify_report just because a
+    rule mentions verification — the recommender already verified what
+    needed verifying.
+
+    Hard rules (these directly affect reward, listed for tie-breaking only):
+    - allocate_unit / issue_evacuation against an unverified non-sensor report
+      costs -0.10. The recommender will not do this; do not introduce it.
+    - allocate_unit whose unit_type is not in the zone's required_unit_types
+      costs -0.15.
+    - Targeting a zone with access_status == "blocked" costs -0.20.
+    - Resolving a critical zone with the right unit BEFORE its deadline_steps
+      pays +0.30. Missing a deadline costs -0.50, so do NOT stall on
+      verification once at least one true zone has a matching available unit.
+    - Flag false_alarm only after a verification disputed the report.
+    - publish_sitrep ends the episode — only do it when the recommender does.
+
+    Use only IDs that appear in the visible observation. Return JSON only. No
+    markdown fences. No prose outside the JSON.
     """
 ).strip()
+
+TASK_BRIEFS: Dict[str, str] = {
+    "single_zone_response": (
+        "EASY tier — one district, one active incident zone, ~3 incoming reports, "
+        "8-step episode cap. Verify the report stream, allocate the matching unit "
+        "type to the true zone before its deadline, then publish a sitrep."
+    ),
+    "multi_zone_triage": (
+        "MEDIUM tier — single district with multiple concurrent incident zones, "
+        "~6 reports including some false alarms, 15-step cap. Triage by deadline "
+        "and severity: verify before committing scarce units, flag disputed "
+        "reports as false_alarm, then publish a sitrep when urgent work is done."
+    ),
+    "cascading_crisis": (
+        "HARD tier — incidents cascade as the episode unfolds; ~10 reports stream "
+        "in (some appear after step 12), 25-step cap. Earlier zones must be "
+        "resolved before new ones arrive or you will start missing deadlines "
+        "(-0.50 each). Verify non-sensor reports before allocation."
+    ),
+    "multi_district_coordination": (
+        "EXPERT tier — multiple districts with limited mutual-aid units, ~16 "
+        "reports streaming through step 20, 40-step cap. Comms in one district "
+        "degrade mid-episode (sensor reports drop to lower confidence) so verify "
+        "aggressively. Mutual-aid units unlock at mutual_aid_unlock_step. Match "
+        "unit_type to required_unit_types and avoid blocked zones."
+    ),
+}
 
 ACTION_FORMAT_PROMPT = textwrap.dedent(
     """
@@ -473,23 +513,35 @@ def choose_action(
     task_id: str,
     obs: Mapping[str, Any],
     fallback_action: Mapping[str, Any],
+    history: List[Dict[str, Any]],
 ) -> Tuple[dict, str]:
     if client is None or not USE_LLM:
         return dict(fallback_action), "deterministic"
 
+    brief = TASK_BRIEFS.get(task_id, "(no brief)")
+    history_lines = _format_history_lines(history)
+
     prompt = textwrap.dedent(
         f"""
         Task: {task_id}
+        Brief: {brief}
         Time step: {obs.get("time_step")}
         Episode cap: {(obs.get("metadata") or {}).get("episode_cap", TASK_CONFIGS[task_id]["episode_cap"])}
 
         Action contract:
         {ACTION_FORMAT_PROMPT}
 
+        Recent steps (most recent last):
+        {history_lines}
+
         Current observation:
         {json.dumps(_compact_observation(obs), sort_keys=True)}
 
-        Choose the next action yourself. Return exactly one JSON object.
+        Recommended action (deterministic policy's pick — copy verbatim unless
+        the observation gives a clear reason to deviate):
+        {json.dumps(dict(fallback_action), sort_keys=True)}
+
+        Return exactly one JSON object.
         """
     ).strip()
 
@@ -707,11 +759,26 @@ def grade_from_observation(obs: Mapping[str, Any], rewards: Iterable[float]) -> 
     return max(0.01, min(0.99, 0.35 + reward_total))
 
 
+def _format_history_lines(history: List[Dict[str, Any]]) -> str:
+    if not history:
+        return "  (none yet)"
+    lines = []
+    for entry in history[-5:]:
+        error = entry.get("error") or "ok"
+        lines.append(
+            f"  step={entry['step']} action={entry['action']} "
+            f"reward={entry['reward']:+.2f} done={str(entry['done']).lower()} "
+            f"error={error}"
+        )
+    return "\n".join(lines)
+
+
 def run_task(client: Any, task_id: str) -> Tuple[float, List[float], List[str]]:
     log_start(task=task_id, client=client)
     memory = EpisodeMemory()
     rewards: List[float] = []
     action_sources: List[str] = []
+    history: List[Dict[str, Any]] = []
     step_count = 0
     final_obs: Dict[str, Any] = {}
 
@@ -733,7 +800,9 @@ def run_task(client: Any, task_id: str) -> Tuple[float, List[float], List[str]]:
             if done:
                 break
             fallback_action = make_policy_action(task_id, obs, memory)
-            action, action_source = choose_action(client, task_id, obs, fallback_action)
+            action, action_source = choose_action(
+                client, task_id, obs, fallback_action, history
+            )
             response = env_step(session_id, action)
             next_obs = response.get("observation") or response
             reward = float(response.get("reward") or next_obs.get("reward") or 0.0)
@@ -747,6 +816,15 @@ def run_task(client: Any, task_id: str) -> Tuple[float, List[float], List[str]]:
             final_obs = dict(next_obs)
 
             error = _error_from_observation(next_obs)
+            history.append(
+                {
+                    "step": step,
+                    "action": str(action.get("type", "unknown")),
+                    "reward": reward,
+                    "done": done,
+                    "error": error,
+                }
+            )
             log_step(
                 step=step,
                 action=str(action.get("type", "unknown")),
@@ -932,12 +1010,18 @@ def _compact_observation(obs: Mapping[str, Any]) -> dict:
         "visible_zones": [
             {
                 "zone_id": zone.get("zone_id"),
+                "name": zone.get("name"),
                 "incident_type": zone.get("incident_type"),
                 "severity": zone.get("severity"),
+                "population_at_risk": zone.get("population_at_risk"),
                 "deadline_steps": zone.get("deadline_steps"),
                 "access_status": zone.get("access_status"),
                 "district_id": zone.get("district_id"),
-                "required_unit_types": zone.get("required_unit_types"),
+                "required_unit_types": sorted(zone.get("required_unit_types") or []),
+                "shelter_id": (zone.get("shelter") or {}).get("shelter_id"),
+                "shelter_capacity_available": (zone.get("shelter") or {}).get(
+                    "capacity_available"
+                ),
             }
             for zone in (obs.get("visible_zones") or [])
         ],
@@ -945,7 +1029,10 @@ def _compact_observation(obs: Mapping[str, Any]) -> dict:
             {
                 "report_id": report.get("report_id"),
                 "zone_id": report.get("zone_id"),
+                "source": report.get("source"),
                 "report_type": report.get("report_type"),
+                "severity": report.get("severity"),
+                "description": (str(report.get("description") or ""))[:200],
                 "verified_status": report.get("verified_status"),
                 "confidence": report.get("confidence"),
                 "reveal_at_step": report.get("reveal_at_step"),
@@ -957,13 +1044,16 @@ def _compact_observation(obs: Mapping[str, Any]) -> dict:
                 "unit_id": unit.get("unit_id"),
                 "unit_type": unit.get("unit_type"),
                 "status": unit.get("status"),
+                "current_zone_id": unit.get("current_zone_id"),
+                "capacity": unit.get("capacity"),
+                "capabilities": unit.get("capabilities"),
                 "fatigue": unit.get("fatigue"),
                 "district_id": unit.get("district_id"),
                 "mutual_aid_unlock_step": unit.get("mutual_aid_unlock_step"),
             }
             for unit in (obs.get("resources") or [])
         ],
-        "incident_log": obs.get("incident_log", []),
+        "incident_log": (obs.get("incident_log") or [])[-6:],
     }
 
 
