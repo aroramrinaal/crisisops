@@ -51,6 +51,7 @@ USE_LLM = os.getenv("USE_LLM", "1").strip().lower() not in {"0", "false", "no", 
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
 SUCCESS_THRESHOLD = float(os.getenv("SUCCESS_THRESHOLD", "0.75"))
+VERBOSE = os.getenv("VERBOSE", "0").strip().lower() not in {"0", "false", "no", "off"}
 
 TASK_TIERS: Dict[str, str] = {
     "single_zone_response": "easy",
@@ -545,6 +546,14 @@ def choose_action(
         """
     ).strip()
 
+    if VERBOSE:
+        print("\n" + "=" * 60, flush=True)
+        print("[VERBOSE] SYSTEM PROMPT SENT TO MODEL:", flush=True)
+        print(SYSTEM_PROMPT, flush=True)
+        print("[VERBOSE] USER PROMPT SENT TO MODEL:", flush=True)
+        print(prompt, flush=True)
+        print("=" * 60 + "\n", flush=True)
+
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
@@ -557,6 +566,8 @@ def choose_action(
             stream=False,
         )
         response_text = completion.choices[0].message.content or ""
+        if VERBOSE:
+            print(f"[VERBOSE] MODEL RAW RESPONSE:\n{response_text}\n", flush=True)
         parsed = parse_action_json(response_text)
         return sanitize_model_action(parsed), "llm"
     except Exception as exc:
