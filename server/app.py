@@ -125,15 +125,19 @@ def main(host: str = "0.0.0.0", port: int = 8000):
     multiple workers:
         uvicorn crisisops.server.app:app --workers 4
     """
+    import argparse
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default=host)
+    parser.add_argument("--port", type=int, default=None)
+    args = parser.parse_args()
+
+    resolved_port = args.port
+    if resolved_port is None:
+        resolved_port = int(os.environ.get("PORT", str(port)))
+    uvicorn.run(app, host=args.host, port=resolved_port)
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()
