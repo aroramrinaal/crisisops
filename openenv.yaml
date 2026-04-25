@@ -5,3 +5,12 @@ runtime: fastapi
 app: server.app:app
 port: 8000
 
+tasks:
+  - id: single_zone_response
+    grader: server.grader:EasyGrader
+  - id: multi_zone_triage
+    grader: server.grader:MediumGrader
+  - id: cascading_crisis
+    grader: server.grader:HardGrader
+  - id: multi_district_coordination
+    grader: server.grader:ExpertGrader
