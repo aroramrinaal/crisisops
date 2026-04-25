@@ -19,7 +19,7 @@ Optional env vars:
     MAX_STEPS      Per-episode safety cap. Defaults to the task episode cap.
 
 STDOUT format:
-    [START] task=<task_id> env=crisisops model=<model_name>
+    [START] task=<task_id> env=crisisops policy=<deterministic|llm> model=<model_name|none>
     [STEP]  step=<n> action=<action_type> reward=<0.00> done=<true|false> error=<msg|null>
     [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
 """
@@ -46,7 +46,7 @@ ENV_URL = os.getenv("ENV_URL", "https://mrinaalarora-crisisops.hf.space").rstrip
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
-USE_LLM = os.getenv("USE_LLM", "1").lower() not in {"0", "false", "no"}
+USE_LLM = os.getenv("USE_LLM", "1").strip().lower() not in {"0", "false", "no", "off"}
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
 SUCCESS_THRESHOLD = float(os.getenv("SUCCESS_THRESHOLD", "0.35"))
@@ -193,8 +193,17 @@ class EpisodeMemory:
                     self.resolved_zone_ids.add(zone_id)
 
 
-def log_start(task: str, model: str) -> None:
-    print(f"[START] task={task} env={ENV_NAME} model={model}", flush=True)
+def log_start(task: str, client: Any) -> None:
+    if client is None:
+        print(
+            f"[START] task={task} env={ENV_NAME} policy=deterministic model=none",
+            flush=True,
+        )
+        return
+    print(
+        f"[START] task={task} env={ENV_NAME} policy=llm model={MODEL_NAME}",
+        flush=True,
+    )
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
@@ -474,7 +483,7 @@ def grade_from_observation(obs: Mapping[str, Any], rewards: Iterable[float]) -> 
 
 
 def run_task(client: Any, task_id: str) -> Tuple[float, List[float]]:
-    log_start(task=task_id, model=MODEL_NAME)
+    log_start(task=task_id, client=client)
     memory = EpisodeMemory()
     rewards: List[float] = []
     step_count = 0
@@ -558,9 +567,12 @@ def build_openai_client() -> Any:
 
 def main() -> None:
     client = build_openai_client()
+    policy = "llm" if client is not None else "deterministic"
+    active_model = MODEL_NAME if client is not None else "none"
     print(
-        f"[DEBUG] env={ENV_URL} model={MODEL_NAME} api_base={API_BASE_URL} "
-        f"hf_token_set={str(bool(API_KEY)).lower()} use_llm={str(bool(client)).lower()}",
+        f"[DEBUG] env={ENV_URL} policy={policy} model={active_model} "
+        f"api_base={API_BASE_URL} hf_token_set={str(bool(API_KEY)).lower()} "
+        f"use_llm={str(bool(client)).lower()}",
         flush=True,
     )
     results: Dict[str, Dict[str, Any]] = {}
