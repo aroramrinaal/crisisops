@@ -16,7 +16,7 @@ Optional env vars:
     TASK_NAME      Alias for TASK_ID. Tier names easy/medium/hard/expert work.
     SEED           Optional scenario seed passed to /reset.
     USE_LLM        Set to 0 to skip model calls and use the deterministic policy.
-    USE_WEBSOCKET  Set to 0 to force legacy stateless HTTP transport.
+    SUCCESS_THRESHOLD  Score needed for success=true. Defaults to 0.75.
     MAX_STEPS      Per-episode safety cap. Defaults to the task episode cap.
 
 STDOUT format:
@@ -27,18 +27,12 @@ STDOUT format:
 
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass, field
-import hashlib
 import json
 import os
 import re
-import socket
-import ssl
-import struct
 import textwrap
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -54,15 +48,9 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 USE_LLM = os.getenv("USE_LLM", "1").strip().lower() not in {"0", "false", "no", "off"}
-USE_WEBSOCKET = os.getenv("USE_WEBSOCKET", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
-SUCCESS_THRESHOLD = float(os.getenv("SUCCESS_THRESHOLD", "0.35"))
+SUCCESS_THRESHOLD = float(os.getenv("SUCCESS_THRESHOLD", "0.75"))
 
 TASK_TIERS: Dict[str, str] = {
     "single_zone_response": "easy",
@@ -311,186 +299,20 @@ def env_reset(task_id: str) -> dict:
     return post_json("/reset", payload)
 
 
-def env_step(action: Mapping[str, Any]) -> dict:
-    return post_json("/step", {"action": dict(action)})
+def env_step(session_id: str, action: Mapping[str, Any]) -> dict:
+    return post_json("/step", {"session_id": session_id, "action": dict(action)})
 
 
-class OpenEnvEpisodeSession:
-    """Tiny dependency-free WebSocket client for persistent OpenEnv episodes."""
-
-    def __init__(self, base_url: str):
-        self.ws_url = self._websocket_url(base_url)
-        self._sock: Optional[socket.socket] = None
-
-    def __enter__(self) -> "OpenEnvEpisodeSession":
-        self._connect()
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        self.close()
-
-    def reset(self, task_id: str) -> dict:
-        data: Dict[str, Any] = {"task_id": task_id}
-        if os.getenv("SEED"):
-            data["seed"] = int(os.environ["SEED"])
-        return self._request("reset", data)
-
-    def step(self, action: Mapping[str, Any]) -> dict:
-        return self._request("step", dict(action))
-
-    def close(self) -> None:
-        sock = self._sock
-        if sock is None:
-            return
-        try:
-            self._send_json({"type": "close", "data": {}})
-            self._send_frame(b"", opcode=0x8)
-        except (OSError, RuntimeError):
-            pass
-        finally:
-            self._sock = None
-            sock.close()
-
-    @staticmethod
-    def _websocket_url(base_url: str) -> str:
-        if base_url.startswith("https://"):
-            return "wss://" + base_url[len("https://") :] + "/ws"
-        if base_url.startswith("http://"):
-            return "ws://" + base_url[len("http://") :] + "/ws"
-        return base_url.rstrip("/") + "/ws"
-
-    def _connect(self) -> None:
-        parsed = urlparse(self.ws_url)
-        if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
-            raise RuntimeError(f"Invalid WebSocket URL: {self.ws_url}")
-
-        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
-        raw_sock = socket.create_connection((parsed.hostname, port), timeout=60)
-        if parsed.scheme == "wss":
-            context = ssl.create_default_context()
-            sock: socket.socket = context.wrap_socket(
-                raw_sock,
-                server_hostname=parsed.hostname,
-            )
-        else:
-            sock = raw_sock
-        sock.settimeout(60)
-
-        path = parsed.path or "/ws"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
-        host = parsed.hostname
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        request = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n"
-        )
-        sock.sendall(request.encode("ascii"))
-        response = self._read_http_headers(sock)
-        accept = base64.b64encode(
-            hashlib.sha1(
-                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
-            ).digest()
-        ).decode("ascii")
-        if " 101 " not in response.split("\r\n", 1)[0]:
-            raise RuntimeError(f"WebSocket upgrade failed: {response.splitlines()[0]}")
-        if f"sec-websocket-accept: {accept.lower()}" not in response.lower():
-            raise RuntimeError("WebSocket upgrade failed: invalid Sec-WebSocket-Accept")
-        self._sock = sock
-
-    def _request(self, message_type: str, data: Mapping[str, Any]) -> dict:
-        self._send_json({"type": message_type, "data": dict(data)})
-        payload = json.loads(self._recv_text())
-        if payload.get("type") == "error":
-            raise RuntimeError(f"WebSocket error: {payload.get('data')}")
-        return dict(payload.get("data") or {})
-
-    def _send_json(self, payload: Mapping[str, Any]) -> None:
-        self._send_frame(json.dumps(payload).encode("utf-8"), opcode=0x1)
-
-    def _send_frame(self, payload: bytes, opcode: int) -> None:
-        if self._sock is None:
-            raise RuntimeError("WebSocket is not connected")
-        first = 0x80 | opcode
-        length = len(payload)
-        if length < 126:
-            header = struct.pack("!BB", first, 0x80 | length)
-        elif length < (1 << 16):
-            header = struct.pack("!BBH", first, 0x80 | 126, length)
-        else:
-            header = struct.pack("!BBQ", first, 0x80 | 127, length)
-        mask = os.urandom(4)
-        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-        self._sock.sendall(header + mask + masked)
-
-    def _recv_text(self) -> str:
-        chunks: List[bytes] = []
-        while True:
-            fin, opcode, payload = self._recv_frame()
-            if opcode == 0x8:
-                raise RuntimeError("WebSocket closed by server")
-            if opcode == 0x9:
-                self._send_frame(payload, opcode=0xA)
-                continue
-            if opcode == 0xA:
-                continue
-            if opcode in {0x1, 0x0}:
-                chunks.append(payload)
-                if fin:
-                    return b"".join(chunks).decode("utf-8")
-                continue
-            raise RuntimeError(f"Unsupported WebSocket opcode: {opcode}")
-
-    def _recv_frame(self) -> Tuple[bool, int, bytes]:
-        if self._sock is None:
-            raise RuntimeError("WebSocket is not connected")
-        first, second = self._read_exact(2)
-        fin = bool(first & 0x80)
-        opcode = first & 0x0F
-        masked = bool(second & 0x80)
-        length = second & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", self._read_exact(2))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", self._read_exact(8))[0]
-        mask = self._read_exact(4) if masked else b""
-        payload = self._read_exact(length)
-        if masked:
-            payload = bytes(
-                byte ^ mask[index % 4] for index, byte in enumerate(payload)
-            )
-        return fin, opcode, payload
-
-    def _read_exact(self, length: int) -> bytes:
-        if self._sock is None:
-            raise RuntimeError("WebSocket is not connected")
-        chunks = bytearray()
-        while len(chunks) < length:
-            chunk = self._sock.recv(length - len(chunks))
-            if not chunk:
-                raise RuntimeError("WebSocket connection closed unexpectedly")
-            chunks.extend(chunk)
-        return bytes(chunks)
-
-    @staticmethod
-    def _read_http_headers(sock: socket.socket) -> str:
-        data = bytearray()
-        while b"\r\n\r\n" not in data:
-            chunk = sock.recv(1)
-            if not chunk:
-                break
-            data.extend(chunk)
-            if len(data) > 65536:
-                raise RuntimeError("WebSocket upgrade response was too large")
-        return data.decode("iso-8859-1", errors="replace")
+def env_state(session_id: str) -> dict:
+    request = Request(f"{ENV_URL}/state?session_id={session_id}", method="GET")
+    try:
+        with urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from /state: {body}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not reach {ENV_URL}/state: {exc}") from exc
 
 
 def make_policy_action(task_id: str, obs: Mapping[str, Any], memory: EpisodeMemory) -> dict:
@@ -887,23 +709,6 @@ def grade_from_observation(obs: Mapping[str, Any], rewards: Iterable[float]) -> 
 
 def run_task(client: Any, task_id: str) -> Tuple[float, List[float], List[str]]:
     log_start(task=task_id, client=client)
-    if USE_WEBSOCKET:
-        try:
-            with OpenEnvEpisodeSession(ENV_URL) as session:
-                return run_task_with_session(client, task_id, session)
-        except Exception as exc:
-            print(
-                f"[DEBUG] websocket episode failed ({exc}); falling back to stateless HTTP",
-                flush=True,
-            )
-    return run_task_with_http(client, task_id)
-
-
-def run_task_with_session(
-    client: Any,
-    task_id: str,
-    session: OpenEnvEpisodeSession,
-) -> Tuple[float, List[float], List[str]]:
     memory = EpisodeMemory()
     rewards: List[float] = []
     action_sources: List[str] = []
@@ -911,11 +716,15 @@ def run_task_with_session(
     final_obs: Dict[str, Any] = {}
 
     try:
-        reset_response = session.reset(task_id)
+        reset_response = env_reset(task_id)
+        session_id = str(reset_response.get("session_id", ""))
+        if not session_id:
+            raise RuntimeError("Reset response did not include session_id")
         obs = reset_response.get("observation") or reset_response
         done = bool(reset_response.get("done", False) or obs.get("done", False))
         final_obs = dict(obs)
         memory.update_from_observation(obs)
+        env_state(session_id)
 
         max_steps = int(
             os.getenv("MAX_STEPS", str(TASK_CONFIGS[task_id]["episode_cap"]))
@@ -925,67 +734,7 @@ def run_task_with_session(
                 break
             fallback_action = make_policy_action(task_id, obs, memory)
             action, action_source = choose_action(client, task_id, obs, fallback_action)
-            response = session.step(action)
-            next_obs = response.get("observation") or response
-            reward = float(response.get("reward") or next_obs.get("reward") or 0.0)
-            done = bool(response.get("done", False) or next_obs.get("done", False))
-
-            memory.remember_action(action)
-            memory.update_from_observation(next_obs)
-            rewards.append(reward)
-            action_sources.append(action_source)
-            step_count = step
-            final_obs = dict(next_obs)
-
-            error = _error_from_observation(next_obs)
-            log_step(
-                step=step,
-                action=str(action.get("type", "unknown")),
-                reward=reward,
-                done=done,
-                error=error,
-                source=action_source,
-            )
-            obs = next_obs
-
-    except Exception as exc:
-        print(f"[DEBUG] episode error for task={task_id}: {exc}", flush=True)
-        if not rewards:
-            rewards = [0.0]
-
-    score = grade_from_observation(final_obs, rewards) if final_obs else 0.01
-    score = max(0.01, min(0.99, score))
-    log_end(
-        success=score >= SUCCESS_THRESHOLD,
-        steps=step_count,
-        score=score,
-        rewards=rewards,
-        action_sources=action_sources,
-    )
-    return score, rewards, action_sources
-
-
-def run_task_with_http(client: Any, task_id: str) -> Tuple[float, List[float], List[str]]:
-    memory = EpisodeMemory()
-    rewards: List[float] = []
-    action_sources: List[str] = []
-    step_count = 0
-    final_obs: Dict[str, Any] = {}
-
-    try:
-        reset_response = env_reset(task_id)
-        obs = reset_response.get("observation") or reset_response
-        done = bool(reset_response.get("done", False) or obs.get("done", False))
-        final_obs = dict(obs)
-        memory.update_from_observation(obs)
-
-        max_steps = int(os.getenv("MAX_STEPS", str(TASK_CONFIGS[task_id]["episode_cap"])))
-        for step in range(1, max_steps + 1):
-            if done:
-                break
-            fallback_action = make_policy_action(task_id, obs, memory)
-            action, action_source = choose_action(client, task_id, obs, fallback_action)
-            response = env_step(action)
+            response = env_step(session_id, action)
             next_obs = response.get("observation") or response
             reward = float(response.get("reward") or next_obs.get("reward") or 0.0)
             done = bool(response.get("done", False) or next_obs.get("done", False))
@@ -1063,8 +812,7 @@ def main() -> None:
     print(
         f"[DEBUG] env={ENV_URL} policy={policy} model={active_model} "
         f"api_base={API_BASE_URL} hf_token_set={str(bool(API_KEY)).lower()} "
-        f"use_llm={str(bool(client)).lower()} "
-        f"transport={'websocket' if USE_WEBSOCKET else 'http'}",
+        f"use_llm={str(bool(client)).lower()} transport=http-session",
         flush=True,
     )
     results: Dict[str, Dict[str, Any]] = {}

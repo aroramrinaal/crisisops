@@ -33,11 +33,15 @@ class TestAppRoutes:
         demo_response = client.get("/demo")
         health_response = client.get("/health")
         reset_response = client.post("/reset")
+        session_id = reset_response.json()["session_id"]
         step_response = client.post(
             "/step",
-            json={"action": {"type": "noop", "reason": "await verified reports"}},
+            json={
+                "session_id": session_id,
+                "action": {"type": "noop", "reason": "await verified reports"},
+            },
         )
-        state_response = client.get("/state")
+        state_response = client.get("/state", params={"session_id": session_id})
         schema_response = client.get("/schema")
 
         assert demo_response.status_code == 200
@@ -66,10 +70,12 @@ class TestAppRoutes:
         reset_response = client.post(
             "/reset", json={"task_id": "single_zone_response", "seed": 42}
         )
+        session_id = reset_response.json()["session_id"]
         report_id = reset_response.json()["observation"]["reports"][0]["report_id"]
         step_response = client.post(
             "/step",
             json={
+                "session_id": session_id,
                 "action": {
                     "type": "verify_report",
                     "report_id": report_id,
@@ -91,10 +97,15 @@ class TestAppRoutes:
 
     def test_terminal_step_returns_terminal_score_metadata(self):
         client = TestClient(_load_app(enable_web_interface=False))
+        reset_response = client.post(
+            "/reset", json={"task_id": "single_zone_response", "seed": 42}
+        )
+        session_id = reset_response.json()["session_id"]
 
         response = client.post(
             "/step",
             json={
+                "session_id": session_id,
                 "action": {
                     "type": "publish_sitrep",
                     "payload": {
@@ -112,6 +123,54 @@ class TestAppRoutes:
         body = response.json()
         assert body["done"] is True
         assert "terminal_score" in body["observation"]["metadata"]
+
+    def test_http_sessions_keep_independent_state(self):
+        client = TestClient(_load_app(enable_web_interface=False))
+
+        reset_a = client.post(
+            "/reset", json={"task_id": "cascading_crisis", "seed": 42}
+        ).json()
+        reset_b = client.post(
+            "/reset", json={"task_id": "cascading_crisis", "seed": 42}
+        ).json()
+        session_a = reset_a["session_id"]
+        session_b = reset_b["session_id"]
+
+        assert session_a != session_b
+
+        first_report = reset_a["observation"]["reports"][0]["report_id"]
+        step_a = client.post(
+            "/step",
+            json={
+                "session_id": session_a,
+                "action": {
+                    "type": "verify_report",
+                    "report_id": first_report,
+                    "verification_method": "cross_check",
+                    "rationale": "confirm before dispatch",
+                },
+            },
+        )
+
+        assert step_a.status_code == 200
+        assert step_a.json()["observation"]["time_step"] == 1
+        state_a = client.get("/state", params={"session_id": session_a})
+        state_b = client.get("/state", params={"session_id": session_b})
+        assert state_a.json()["step_count"] == 1
+        assert state_b.json()["step_count"] == 0
+
+    def test_step_rejects_unknown_session_id(self):
+        client = TestClient(_load_app(enable_web_interface=False))
+
+        response = client.post(
+            "/step",
+            json={
+                "session_id": "missing-session",
+                "action": {"type": "noop", "reason": "await verified reports"},
+            },
+        )
+
+        assert response.status_code == 404
 
     def test_scaffold_documentation_and_web_routes_are_removed(self):
         client = TestClient(_load_app(enable_web_interface=True))
