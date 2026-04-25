@@ -3,7 +3,7 @@
 from random import Random
 
 try:
-    from ..models import Report, RouteInfo, ShelterInfo, Unit, Zone
+    from ...models import Report, RouteInfo, ShelterInfo, Unit, Zone
     from ..rules import unit_type_for_incident
     from .config import REPORT_TYPES, RISK_BY_TRUTH, SOURCES, ZONE_NAMES, TierConfig
 except ImportError:

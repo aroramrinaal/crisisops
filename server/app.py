@@ -38,11 +38,25 @@ from fastapi.responses import RedirectResponse
 os.environ["ENABLE_WEB_INTERFACE"] = "false"
 
 try:
-    from openenv.core.env_server.http_server import create_app
+    from openenv.core.env_server import http_server as openenv_http_server
 except Exception as e:  # pragma: no cover
     raise ImportError(
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
+
+
+def serialize_observation_with_metadata(observation):
+    """Preserve Observation.metadata in OpenEnv response observation payloads."""
+    obs_dict = observation.model_dump(exclude={"reward", "done"})
+    return {
+        "observation": obs_dict,
+        "reward": observation.reward,
+        "done": observation.done,
+    }
+
+
+openenv_http_server.serialize_observation = serialize_observation_with_metadata
+create_app = openenv_http_server.create_app
 
 try:
     from ..models import CrisisopsAction, CrisisopsObservation

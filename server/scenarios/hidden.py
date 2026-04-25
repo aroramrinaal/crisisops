@@ -4,7 +4,7 @@ from random import Random
 from typing import Any
 
 try:
-    from ..models import Report, Zone
+    from ...models import Report, Zone
     from ..rules import priority_key
     from .config import TierConfig
 except ImportError:

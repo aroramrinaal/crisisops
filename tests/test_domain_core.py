@@ -1,6 +1,7 @@
 """Tests for the pure Python Crisisops domain core."""
 
 from server.grader import EasyGrader
+from server.crisisops_environment import CrisisopsEnvironment
 from server.reward import compute_step_reward
 from server.rules import compute_optimal_plan
 from server.scenario_generator import generate_scenario
@@ -58,3 +59,14 @@ def test_rules_compute_plan_without_hand_authored_answers():
 
     assert plan
     assert plan[-1].root.type == "publish_sitrep"
+
+
+def test_environment_terminal_score_lands_in_observation_metadata():
+    env = CrisisopsEnvironment()
+    env.reset(task_id="single_zone_response", seed=42, episode_id="episode-test")
+    terminal = env.step(env.optimal_plan[-1])
+
+    assert terminal.done is True
+    assert "terminal_score" in terminal.metadata
+    assert 0.01 <= terminal.metadata["terminal_score"] <= 0.99
+    assert env.state.current_task_id == "single_zone_response"

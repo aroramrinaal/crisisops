@@ -44,7 +44,7 @@ class CrisisopsEnv(
         Returns:
             Dictionary representation suitable for JSON encoding
         """
-        return action.model_dump(mode="json")
+        return action.model_dump()
 
     def _parse_result(self, payload: Dict) -> StepResult[CrisisopsObservation]:
         """
@@ -66,7 +66,7 @@ class CrisisopsEnv(
             session_id=obs_data.get("session_id", ""),
             done=payload.get("done", False),
             reward=payload.get("reward"),
-            metadata=obs_data.get("metadata", {}),
+            metadata=obs_data.get("metadata", payload.get("metadata", {})),
         )
 
         return StepResult(
