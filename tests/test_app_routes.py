@@ -33,18 +33,27 @@ class TestAppRoutes:
         demo_response = client.get("/demo")
         health_response = client.get("/health")
         reset_response = client.post("/reset")
-        step_response = client.post("/step", json={"action": {"message": "hello"}})
+        step_response = client.post(
+            "/step",
+            json={"action": {"type": "noop", "reason": "await verified reports"}},
+        )
         state_response = client.get("/state")
         schema_response = client.get("/schema")
 
         assert demo_response.status_code == 200
         assert health_response.status_code == 200
         assert reset_response.status_code == 200
-        assert reset_response.json()["observation"]["echoed_message"] == (
-            "Crisisops environment ready!"
-        )
+        reset_observation = reset_response.json()["observation"]
+        assert reset_observation["visible_zones"] == []
+        assert reset_observation["reports"] == []
+        assert reset_observation["resources"] == []
+        assert reset_observation["time_step"] == 0
+        assert reset_observation["incident_log"] == ["Crisisops environment ready."]
+        assert reset_observation["session_id"]
         assert step_response.status_code == 200
-        assert step_response.json()["observation"]["echoed_message"] == "hello"
+        assert step_response.json()["observation"]["incident_log"] == [
+            "Accepted noop action."
+        ]
         assert state_response.status_code == 200
         assert schema_response.status_code == 200
 

@@ -4,12 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Crisisops Environment Implementation.
-
-A simple test environment that echoes back messages sent to it.
-Perfect for testing HTTP server infrastructure.
-"""
+"""Crisisops Environment Implementation."""
 
 from uuid import uuid4
 
@@ -23,21 +18,7 @@ except ImportError:
 
 
 class CrisisopsEnvironment(Environment):
-    """
-    A simple echo environment that echoes back messages.
-
-    This environment is designed for testing the HTTP server infrastructure.
-    It maintains minimal state and simply echoes back whatever message it receives.
-
-    Example:
-        >>> env = CrisisopsEnvironment()
-        >>> obs = env.reset()
-        >>> print(obs.echoed_message)  # "Crisisops environment ready!"
-        >>>
-        >>> obs = env.step(CrisisopsAction(message="Hello"))
-        >>> print(obs.echoed_message)  # "Hello"
-        >>> print(obs.message_length)  # 5
-    """
+    """Minimal Phase 1 environment that emits the structured Crisisops contract."""
 
     # Enable concurrent WebSocket sessions.
     # Set to True if your environment isolates state between instances.
@@ -55,42 +36,25 @@ class CrisisopsEnvironment(Environment):
         Reset the environment.
 
         Returns:
-            CrisisopsObservation with a ready message
+            Empty structured CrisisopsObservation for a new session.
         """
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._reset_count += 1
 
-        return CrisisopsObservation(
-            echoed_message="Crisisops environment ready!",
-            message_length=0,
-            done=False,
-            reward=0.0,
-        )
+        return self._observation(["Crisisops environment ready."])
 
     def step(self, action: CrisisopsAction) -> CrisisopsObservation:  # type: ignore[override]
-        """
-        Execute a step in the environment by echoing the message.
-
-        Args:
-            action: CrisisopsAction containing the message to echo
-
-        Returns:
-            CrisisopsObservation with the echoed message and its length
-        """
+        """Accept a typed action and return the next structured observation."""
         self._state.step_count += 1
 
-        message = action.message
-        length = len(message)
-
-        # Simple reward: longer messages get higher rewards
-        reward = length * 0.1
-
-        return CrisisopsObservation(
-            echoed_message=message,
-            message_length=length,
-            done=False,
-            reward=reward,
-            metadata={"original_message": message, "step": self._state.step_count},
+        action_payload = action.root
+        action_type = action_payload.type
+        return self._observation(
+            [f"Accepted {action_type} action."],
+            metadata={
+                "action_type": action_type,
+                "step": self._state.step_count,
+            },
         )
 
     @property
@@ -102,3 +66,18 @@ class CrisisopsEnvironment(Environment):
             Current State with episode_id and step_count
         """
         return self._state
+
+    def _observation(
+        self, incident_log: list[str], metadata: dict | None = None
+    ) -> CrisisopsObservation:
+        return CrisisopsObservation(
+            visible_zones=[],
+            reports=[],
+            resources=[],
+            time_step=self._state.step_count,
+            incident_log=incident_log,
+            session_id=self._state.episode_id,
+            done=False,
+            reward=0.0,
+            metadata=metadata or {},
+        )

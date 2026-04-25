@@ -26,22 +26,12 @@ class CrisisopsEnv(
     Each client instance has its own dedicated environment session on the server.
 
     Example:
-        >>> # Connect to a running server
         >>> with CrisisopsEnv(base_url="http://localhost:8000") as client:
         ...     result = client.reset()
-        ...     print(result.observation.echoed_message)
-        ...
-        ...     result = client.step(CrisisopsAction(message="Hello!"))
-        ...     print(result.observation.echoed_message)
-
-    Example with Docker:
-        >>> # Automatically start container and connect
-        >>> client = CrisisopsEnv.from_docker_image("crisisops-env:latest")
-        >>> try:
-        ...     result = client.reset()
-        ...     result = client.step(CrisisopsAction(message="Test"))
-        ... finally:
-        ...     client.close()
+        ...     result = client.step(CrisisopsAction.model_validate({
+        ...         "type": "noop",
+        ...         "reason": "wait for verified reports",
+        ...     }))
     """
 
     def _step_payload(self, action: CrisisopsAction) -> Dict:
@@ -54,9 +44,7 @@ class CrisisopsEnv(
         Returns:
             Dictionary representation suitable for JSON encoding
         """
-        return {
-            "message": action.message,
-        }
+        return action.model_dump(mode="json")
 
     def _parse_result(self, payload: Dict) -> StepResult[CrisisopsObservation]:
         """
@@ -70,8 +58,12 @@ class CrisisopsEnv(
         """
         obs_data = payload.get("observation", {})
         observation = CrisisopsObservation(
-            echoed_message=obs_data.get("echoed_message", ""),
-            message_length=obs_data.get("message_length", 0),
+            visible_zones=obs_data.get("visible_zones", []),
+            reports=obs_data.get("reports", []),
+            resources=obs_data.get("resources", []),
+            time_step=obs_data.get("time_step", 0),
+            incident_log=obs_data.get("incident_log", []),
+            session_id=obs_data.get("session_id", ""),
             done=payload.get("done", False),
             reward=payload.get("reward"),
             metadata=obs_data.get("metadata", {}),
