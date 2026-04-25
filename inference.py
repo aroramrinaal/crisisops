@@ -1,9 +1,9 @@
 """
 Baseline inference script for the CrisisOps OpenEnv environment.
 
-The script is intentionally conservative: it uses a deterministic incident
-command policy as the safe fallback, and can ask an OpenAI-compatible model to
-return the same JSON action shape when API credentials are available.
+The script lets an OpenAI-compatible model drive the environment when
+credentials are available, and uses a deterministic incident-command policy only
+as a fallback when the model call or returned JSON action fails.
 
 Required hackathon-style env vars:
     ENV_URL        Base URL of the CrisisOps FastAPI server.
@@ -16,22 +16,29 @@ Optional env vars:
     TASK_NAME      Alias for TASK_ID. Tier names easy/medium/hard/expert work.
     SEED           Optional scenario seed passed to /reset.
     USE_LLM        Set to 0 to skip model calls and use the deterministic policy.
+    USE_WEBSOCKET  Set to 0 to force legacy stateless HTTP transport.
     MAX_STEPS      Per-episode safety cap. Defaults to the task episode cap.
 
 STDOUT format:
     [START] task=<task_id> env=crisisops policy=<deterministic|llm> model=<model_name|none>
-    [STEP]  step=<n> action=<action_type> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...,rn>
+    [STEP]  step=<n> action=<action_type> source=<source> reward=<0.00> done=<bool> error=<msg|null>
+    [END]   success=<bool> steps=<n> score=<0.000> sources=<counts> rewards=<r1,...,rn>
 """
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 import re
+import socket
+import ssl
+import struct
 import textwrap
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -47,6 +54,12 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 USE_LLM = os.getenv("USE_LLM", "1").strip().lower() not in {"0", "false", "no", "off"}
+USE_WEBSOCKET = os.getenv("USE_WEBSOCKET", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
 SUCCESS_THRESHOLD = float(os.getenv("SUCCESS_THRESHOLD", "0.35"))
@@ -109,12 +122,39 @@ ACTION_JSON_RE = re.compile(r"\{[\s\S]*\}")
 SYSTEM_PROMPT = textwrap.dedent(
     """
     You are an emergency operations commander for CrisisOps. Return exactly one
-    JSON object for the next action. Do not include markdown or explanation.
+    JSON object for the next environment action. You are controlling a sequential
+    RL environment under partial observability. Use only visible observation
+    fields; do not invent report IDs, unit IDs, zone IDs, shelter IDs, or routes.
 
-    Prefer the provided deterministic candidate unless the observation clearly
-    proves it is invalid. Valid action types are:
-    verify_report, request_recon, allocate_unit, reroute_unit, issue_evacuation,
-    open_shelter, dispatch_supplies, flag_false_alarm, publish_sitrep, noop.
+    Planning guidance:
+    - Verify non-sensor reports before committing scarce units.
+    - Sensor-confirmed reports can support action without another verification.
+    - Flag reports only after they are disputed or already marked false_alarm.
+    - Allocate available units whose unit_type matches a zone's required_unit_types.
+    - Publish a sitrep only when you believe known urgent work is complete or the
+      episode is near its step limit.
+    - Return JSON only. No markdown fences. No explanation outside the JSON.
+    """
+).strip()
+
+ACTION_FORMAT_PROMPT = textwrap.dedent(
+    """
+    Valid action JSON shapes:
+    {"type":"verify_report","report_id":"report-1","verification_method":"cross_check","rationale":"..."}
+    {"type":"request_recon","zone_id":"zone-1","objective":"...","priority":"normal","report_id":null}
+    {"type":"allocate_unit","unit_id":"unit-1","zone_id":"zone-1","task":"rescue","priority":"high","report_ids":["report-1"]}
+    {"type":"reroute_unit","unit_id":"unit-1","route":{"route_id":"...","from_zone_id":"...","to_zone_id":"...","status":"open","travel_time_minutes":10,"hazards":[]},"reason":"..."}
+    {"type":"issue_evacuation","zone_id":"zone-1","urgency":"critical","message":"...","route_id":null,"destination_shelter_id":null}
+    {"type":"open_shelter","shelter":{"shelter_id":"...","zone_id":"...","name":"...","status":"open","capacity_total":100,"capacity_available":50,"supplies":{}},"reason":"..."}
+    {"type":"dispatch_supplies","supplies":{"water":100,"medical_kits":10},"destination_zone_id":"zone-1","priority":"high","unit_id":null,"destination_shelter_id":null}
+    {"type":"flag_false_alarm","report_id":"report-1","rationale":"...","evidence":["..."]}
+    {"type":"publish_sitrep","payload":{"incidents_confirmed":["report-1"],"incidents_resolved":["zone-1"],"unresolved_risks":[],"false_alarms_detected":[],"summary_text":"..."}}
+    {"type":"noop","reason":"..."}
+
+    Allowed values:
+    verification_method: cross_check, contact_source, field_recon, sensor_review, official_confirmation
+    priority/urgency: low, normal, high, critical
+    task: rescue, medical, evacuation, fire_suppression, supply_delivery, recon, route_clearance
     """
 ).strip()
 
@@ -206,22 +246,45 @@ def log_start(task: str, client: Any) -> None:
     )
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+def log_step(
+    step: int,
+    action: str,
+    reward: float,
+    done: bool,
+    error: Optional[str],
+    source: str,
+) -> None:
     error_val = error if error else "null"
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"[STEP] step={step} action={action} source={source} reward={reward:.2f} "
         f"done={str(done).lower()} error={error_val}",
         flush=True,
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(
+    success: bool,
+    steps: int,
+    score: float,
+    rewards: List[float],
+    action_sources: List[str],
+) -> None:
     rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
+    source_counts = _format_source_counts(action_sources)
     print(
         f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.3f} rewards={rewards_str}",
+        f"score={score:.3f} sources={source_counts} rewards={rewards_str}",
         flush=True,
     )
+
+
+def _format_source_counts(action_sources: Iterable[str]) -> str:
+    counts: Dict[str, int] = {}
+    for source in action_sources:
+        counts[source] = counts.get(source, 0) + 1
+    if not counts:
+        return "none"
+    return ",".join(f"{source}:{counts[source]}" for source in sorted(counts))
 
 
 def post_json(path: str, payload: Mapping[str, Any]) -> dict:
@@ -250,6 +313,184 @@ def env_reset(task_id: str) -> dict:
 
 def env_step(action: Mapping[str, Any]) -> dict:
     return post_json("/step", {"action": dict(action)})
+
+
+class OpenEnvEpisodeSession:
+    """Tiny dependency-free WebSocket client for persistent OpenEnv episodes."""
+
+    def __init__(self, base_url: str):
+        self.ws_url = self._websocket_url(base_url)
+        self._sock: Optional[socket.socket] = None
+
+    def __enter__(self) -> "OpenEnvEpisodeSession":
+        self._connect()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def reset(self, task_id: str) -> dict:
+        data: Dict[str, Any] = {"task_id": task_id}
+        if os.getenv("SEED"):
+            data["seed"] = int(os.environ["SEED"])
+        return self._request("reset", data)
+
+    def step(self, action: Mapping[str, Any]) -> dict:
+        return self._request("step", dict(action))
+
+    def close(self) -> None:
+        sock = self._sock
+        if sock is None:
+            return
+        try:
+            self._send_json({"type": "close", "data": {}})
+            self._send_frame(b"", opcode=0x8)
+        except (OSError, RuntimeError):
+            pass
+        finally:
+            self._sock = None
+            sock.close()
+
+    @staticmethod
+    def _websocket_url(base_url: str) -> str:
+        if base_url.startswith("https://"):
+            return "wss://" + base_url[len("https://") :] + "/ws"
+        if base_url.startswith("http://"):
+            return "ws://" + base_url[len("http://") :] + "/ws"
+        return base_url.rstrip("/") + "/ws"
+
+    def _connect(self) -> None:
+        parsed = urlparse(self.ws_url)
+        if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+            raise RuntimeError(f"Invalid WebSocket URL: {self.ws_url}")
+
+        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        raw_sock = socket.create_connection((parsed.hostname, port), timeout=60)
+        if parsed.scheme == "wss":
+            context = ssl.create_default_context()
+            sock: socket.socket = context.wrap_socket(
+                raw_sock,
+                server_hostname=parsed.hostname,
+            )
+        else:
+            sock = raw_sock
+        sock.settimeout(60)
+
+        path = parsed.path or "/ws"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        host = parsed.hostname
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+        response = self._read_http_headers(sock)
+        accept = base64.b64encode(
+            hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+            ).digest()
+        ).decode("ascii")
+        if " 101 " not in response.split("\r\n", 1)[0]:
+            raise RuntimeError(f"WebSocket upgrade failed: {response.splitlines()[0]}")
+        if f"sec-websocket-accept: {accept.lower()}" not in response.lower():
+            raise RuntimeError("WebSocket upgrade failed: invalid Sec-WebSocket-Accept")
+        self._sock = sock
+
+    def _request(self, message_type: str, data: Mapping[str, Any]) -> dict:
+        self._send_json({"type": message_type, "data": dict(data)})
+        payload = json.loads(self._recv_text())
+        if payload.get("type") == "error":
+            raise RuntimeError(f"WebSocket error: {payload.get('data')}")
+        return dict(payload.get("data") or {})
+
+    def _send_json(self, payload: Mapping[str, Any]) -> None:
+        self._send_frame(json.dumps(payload).encode("utf-8"), opcode=0x1)
+
+    def _send_frame(self, payload: bytes, opcode: int) -> None:
+        if self._sock is None:
+            raise RuntimeError("WebSocket is not connected")
+        first = 0x80 | opcode
+        length = len(payload)
+        if length < 126:
+            header = struct.pack("!BB", first, 0x80 | length)
+        elif length < (1 << 16):
+            header = struct.pack("!BBH", first, 0x80 | 126, length)
+        else:
+            header = struct.pack("!BBQ", first, 0x80 | 127, length)
+        mask = os.urandom(4)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self._sock.sendall(header + mask + masked)
+
+    def _recv_text(self) -> str:
+        chunks: List[bytes] = []
+        while True:
+            fin, opcode, payload = self._recv_frame()
+            if opcode == 0x8:
+                raise RuntimeError("WebSocket closed by server")
+            if opcode == 0x9:
+                self._send_frame(payload, opcode=0xA)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode in {0x1, 0x0}:
+                chunks.append(payload)
+                if fin:
+                    return b"".join(chunks).decode("utf-8")
+                continue
+            raise RuntimeError(f"Unsupported WebSocket opcode: {opcode}")
+
+    def _recv_frame(self) -> Tuple[bool, int, bytes]:
+        if self._sock is None:
+            raise RuntimeError("WebSocket is not connected")
+        first, second = self._read_exact(2)
+        fin = bool(first & 0x80)
+        opcode = first & 0x0F
+        masked = bool(second & 0x80)
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", self._read_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self._read_exact(8))[0]
+        mask = self._read_exact(4) if masked else b""
+        payload = self._read_exact(length)
+        if masked:
+            payload = bytes(
+                byte ^ mask[index % 4] for index, byte in enumerate(payload)
+            )
+        return fin, opcode, payload
+
+    def _read_exact(self, length: int) -> bytes:
+        if self._sock is None:
+            raise RuntimeError("WebSocket is not connected")
+        chunks = bytearray()
+        while len(chunks) < length:
+            chunk = self._sock.recv(length - len(chunks))
+            if not chunk:
+                raise RuntimeError("WebSocket connection closed unexpectedly")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    @staticmethod
+    def _read_http_headers(sock: socket.socket) -> str:
+        data = bytearray()
+        while b"\r\n\r\n" not in data:
+            chunk = sock.recv(1)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > 65536:
+                raise RuntimeError("WebSocket upgrade response was too large")
+        return data.decode("iso-8859-1", errors="replace")
 
 
 def make_policy_action(task_id: str, obs: Mapping[str, Any], memory: EpisodeMemory) -> dict:
@@ -409,23 +650,24 @@ def choose_action(
     client: Any,
     task_id: str,
     obs: Mapping[str, Any],
-    candidate: Mapping[str, Any],
-) -> dict:
+    fallback_action: Mapping[str, Any],
+) -> Tuple[dict, str]:
     if client is None or not USE_LLM:
-        return dict(candidate)
+        return dict(fallback_action), "deterministic"
 
     prompt = textwrap.dedent(
         f"""
         Task: {task_id}
         Time step: {obs.get("time_step")}
-        Candidate action:
-        {json.dumps(candidate, sort_keys=True)}
+        Episode cap: {(obs.get("metadata") or {}).get("episode_cap", TASK_CONFIGS[task_id]["episode_cap"])}
 
-        Observation summary:
+        Action contract:
+        {ACTION_FORMAT_PROMPT}
+
+        Current observation:
         {json.dumps(_compact_observation(obs), sort_keys=True)}
 
-        Return exactly one JSON action object. Keep the same action type as the
-        candidate unless it is invalid.
+        Choose the next action yourself. Return exactly one JSON object.
         """
     ).strip()
 
@@ -442,11 +684,10 @@ def choose_action(
         )
         response_text = completion.choices[0].message.content or ""
         parsed = parse_action_json(response_text)
-        if parsed.get("type") == candidate.get("type"):
-            return sanitize_like_candidate(parsed, candidate)
+        return sanitize_model_action(parsed), "llm"
     except Exception as exc:
-        print(f"[DEBUG] model action selection failed: {exc}", flush=True)
-    return dict(candidate)
+        print(f"[DEBUG] model action selection failed; using fallback: {exc}", flush=True)
+    return dict(fallback_action), "fallback"
 
 
 def parse_action_json(response_text: str) -> dict:
@@ -459,17 +700,179 @@ def parse_action_json(response_text: str) -> dict:
     return parsed
 
 
-def sanitize_like_candidate(parsed: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict:
-    action = dict(candidate)
-    if candidate.get("type") == "publish_sitrep":
+def sanitize_model_action(parsed: Mapping[str, Any]) -> dict:
+    action_type = str(parsed.get("type", ""))
+    if not action_type:
+        raise ValueError("model response missing type")
+
+    if action_type == "verify_report":
+        return {
+            "type": "verify_report",
+            "report_id": _required_str(parsed, "report_id"),
+            "verification_method": _enum_value(
+                parsed.get("verification_method"),
+                {
+                    "cross_check",
+                    "contact_source",
+                    "field_recon",
+                    "sensor_review",
+                    "official_confirmation",
+                },
+                "cross_check",
+            ),
+            "rationale": _text_value(parsed.get("rationale"), "Verify report."),
+        }
+
+    if action_type == "request_recon":
+        return {
+            "type": "request_recon",
+            "zone_id": _required_str(parsed, "zone_id"),
+            "objective": _text_value(parsed.get("objective"), "Clarify incident status."),
+            "priority": _priority_value(parsed.get("priority"), "normal"),
+            "report_id": parsed.get("report_id"),
+        }
+
+    if action_type == "allocate_unit":
+        return {
+            "type": "allocate_unit",
+            "unit_id": _required_str(parsed, "unit_id"),
+            "zone_id": _required_str(parsed, "zone_id"),
+            "task": _enum_value(
+                parsed.get("task"),
+                {
+                    "rescue",
+                    "medical",
+                    "evacuation",
+                    "fire_suppression",
+                    "supply_delivery",
+                    "recon",
+                    "route_clearance",
+                },
+                "recon",
+            ),
+            "priority": _priority_value(parsed.get("priority"), "normal"),
+            "report_ids": _string_list(parsed.get("report_ids")),
+        }
+
+    if action_type == "reroute_unit":
+        route = parsed.get("route")
+        if not isinstance(route, Mapping):
+            raise ValueError("reroute_unit requires route object")
+        return {
+            "type": "reroute_unit",
+            "unit_id": _required_str(parsed, "unit_id"),
+            "route": dict(route),
+            "reason": _text_value(parsed.get("reason"), "Use safer route."),
+        }
+
+    if action_type == "issue_evacuation":
+        return {
+            "type": "issue_evacuation",
+            "zone_id": _required_str(parsed, "zone_id"),
+            "urgency": _priority_value(parsed.get("urgency"), "high"),
+            "message": _text_value(parsed.get("message"), "Evacuate immediately."),
+            "route_id": parsed.get("route_id"),
+            "destination_shelter_id": parsed.get("destination_shelter_id"),
+        }
+
+    if action_type == "open_shelter":
+        shelter = parsed.get("shelter")
+        if not isinstance(shelter, Mapping):
+            raise ValueError("open_shelter requires shelter object")
+        return {
+            "type": "open_shelter",
+            "shelter": dict(shelter),
+            "reason": _text_value(parsed.get("reason"), "Open shelter capacity."),
+        }
+
+    if action_type == "dispatch_supplies":
+        supplies = parsed.get("supplies")
+        if not isinstance(supplies, Mapping) or not supplies:
+            raise ValueError("dispatch_supplies requires non-empty supplies")
+        sanitized_supplies = {
+            str(key): int(value)
+            for key, value in supplies.items()
+            if isinstance(value, (int, float)) and value > 0
+        }
+        if not sanitized_supplies:
+            raise ValueError("dispatch_supplies requires positive supply amounts")
+        return {
+            "type": "dispatch_supplies",
+            "supplies": sanitized_supplies,
+            "destination_zone_id": _required_str(parsed, "destination_zone_id"),
+            "priority": _priority_value(parsed.get("priority"), "normal"),
+            "unit_id": parsed.get("unit_id"),
+            "destination_shelter_id": parsed.get("destination_shelter_id"),
+        }
+
+    if action_type == "flag_false_alarm":
+        return {
+            "type": "flag_false_alarm",
+            "report_id": _required_str(parsed, "report_id"),
+            "rationale": _text_value(parsed.get("rationale"), "Report is disputed."),
+            "evidence": _string_list(parsed.get("evidence")),
+        }
+
+    if action_type == "publish_sitrep":
         payload = parsed.get("payload")
-        if isinstance(payload, Mapping):
-            candidate_payload = dict(candidate.get("payload", {}))
-            summary = payload.get("summary_text")
-            if isinstance(summary, str) and summary.strip():
-                candidate_payload["summary_text"] = summary.strip()[:800]
-            action["payload"] = candidate_payload
-    return action
+        if not isinstance(payload, Mapping):
+            raise ValueError("publish_sitrep requires payload object")
+        return {
+            "type": "publish_sitrep",
+            "payload": {
+                "incidents_confirmed": _string_list(payload.get("incidents_confirmed")),
+                "incidents_resolved": _string_list(payload.get("incidents_resolved")),
+                "unresolved_risks": _string_list(payload.get("unresolved_risks")),
+                "false_alarms_detected": _string_list(
+                    payload.get("false_alarms_detected")
+                ),
+                "summary_text": _text_value(
+                    payload.get("summary_text"),
+                    "Situation report published.",
+                )[:800],
+            },
+        }
+
+    if action_type == "noop":
+        return {
+            "type": "noop",
+            "reason": _text_value(parsed.get("reason"), "Waiting for more evidence."),
+        }
+
+    raise ValueError(f"unknown action type: {action_type}")
+
+
+def _required_str(payload: Mapping[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"action missing required string field: {key}")
+    return value.strip()
+
+
+def _text_value(value: Any, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default
+
+
+def _enum_value(value: Any, allowed: set[str], default: str) -> str:
+    if isinstance(value, str) and value in allowed:
+        return value
+    return default
+
+
+def _priority_value(value: Any, default: str) -> str:
+    return _enum_value(
+        str(value) if value is not None else value,
+        {"low", "normal", "high", "critical"},
+        default,
+    )
+
+
+def _string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, (str, int))]
 
 
 def grade_from_observation(obs: Mapping[str, Any], rewards: Iterable[float]) -> float:
@@ -482,10 +885,90 @@ def grade_from_observation(obs: Mapping[str, Any], rewards: Iterable[float]) -> 
     return max(0.01, min(0.99, 0.35 + reward_total))
 
 
-def run_task(client: Any, task_id: str) -> Tuple[float, List[float]]:
+def run_task(client: Any, task_id: str) -> Tuple[float, List[float], List[str]]:
     log_start(task=task_id, client=client)
+    if USE_WEBSOCKET:
+        try:
+            with OpenEnvEpisodeSession(ENV_URL) as session:
+                return run_task_with_session(client, task_id, session)
+        except Exception as exc:
+            print(
+                f"[DEBUG] websocket episode failed ({exc}); falling back to stateless HTTP",
+                flush=True,
+            )
+    return run_task_with_http(client, task_id)
+
+
+def run_task_with_session(
+    client: Any,
+    task_id: str,
+    session: OpenEnvEpisodeSession,
+) -> Tuple[float, List[float], List[str]]:
     memory = EpisodeMemory()
     rewards: List[float] = []
+    action_sources: List[str] = []
+    step_count = 0
+    final_obs: Dict[str, Any] = {}
+
+    try:
+        reset_response = session.reset(task_id)
+        obs = reset_response.get("observation") or reset_response
+        done = bool(reset_response.get("done", False) or obs.get("done", False))
+        final_obs = dict(obs)
+        memory.update_from_observation(obs)
+
+        max_steps = int(
+            os.getenv("MAX_STEPS", str(TASK_CONFIGS[task_id]["episode_cap"]))
+        )
+        for step in range(1, max_steps + 1):
+            if done:
+                break
+            fallback_action = make_policy_action(task_id, obs, memory)
+            action, action_source = choose_action(client, task_id, obs, fallback_action)
+            response = session.step(action)
+            next_obs = response.get("observation") or response
+            reward = float(response.get("reward") or next_obs.get("reward") or 0.0)
+            done = bool(response.get("done", False) or next_obs.get("done", False))
+
+            memory.remember_action(action)
+            memory.update_from_observation(next_obs)
+            rewards.append(reward)
+            action_sources.append(action_source)
+            step_count = step
+            final_obs = dict(next_obs)
+
+            error = _error_from_observation(next_obs)
+            log_step(
+                step=step,
+                action=str(action.get("type", "unknown")),
+                reward=reward,
+                done=done,
+                error=error,
+                source=action_source,
+            )
+            obs = next_obs
+
+    except Exception as exc:
+        print(f"[DEBUG] episode error for task={task_id}: {exc}", flush=True)
+        if not rewards:
+            rewards = [0.0]
+
+    score = grade_from_observation(final_obs, rewards) if final_obs else 0.01
+    score = max(0.01, min(0.99, score))
+    log_end(
+        success=score >= SUCCESS_THRESHOLD,
+        steps=step_count,
+        score=score,
+        rewards=rewards,
+        action_sources=action_sources,
+    )
+    return score, rewards, action_sources
+
+
+def run_task_with_http(client: Any, task_id: str) -> Tuple[float, List[float], List[str]]:
+    memory = EpisodeMemory()
+    rewards: List[float] = []
+    action_sources: List[str] = []
     step_count = 0
     final_obs: Dict[str, Any] = {}
 
@@ -500,8 +983,8 @@ def run_task(client: Any, task_id: str) -> Tuple[float, List[float]]:
         for step in range(1, max_steps + 1):
             if done:
                 break
-            candidate = make_policy_action(task_id, obs, memory)
-            action = choose_action(client, task_id, obs, candidate)
+            fallback_action = make_policy_action(task_id, obs, memory)
+            action, action_source = choose_action(client, task_id, obs, fallback_action)
             response = env_step(action)
             next_obs = response.get("observation") or response
             reward = float(response.get("reward") or next_obs.get("reward") or 0.0)
@@ -510,6 +993,7 @@ def run_task(client: Any, task_id: str) -> Tuple[float, List[float]]:
             memory.remember_action(action)
             memory.update_from_observation(next_obs)
             rewards.append(reward)
+            action_sources.append(action_source)
             step_count = step
             final_obs = dict(next_obs)
 
@@ -520,6 +1004,7 @@ def run_task(client: Any, task_id: str) -> Tuple[float, List[float]]:
                 reward=reward,
                 done=done,
                 error=error,
+                source=action_source,
             )
             obs = next_obs
 
@@ -530,8 +1015,14 @@ def run_task(client: Any, task_id: str) -> Tuple[float, List[float]]:
 
     score = grade_from_observation(final_obs, rewards) if final_obs else 0.01
     score = max(0.01, min(0.99, score))
-    log_end(success=score >= SUCCESS_THRESHOLD, steps=step_count, score=score, rewards=rewards)
-    return score, rewards
+    log_end(
+        success=score >= SUCCESS_THRESHOLD,
+        steps=step_count,
+        score=score,
+        rewards=rewards,
+        action_sources=action_sources,
+    )
+    return score, rewards, action_sources
 
 
 def selected_tasks() -> List[str]:
@@ -572,22 +1063,28 @@ def main() -> None:
     print(
         f"[DEBUG] env={ENV_URL} policy={policy} model={active_model} "
         f"api_base={API_BASE_URL} hf_token_set={str(bool(API_KEY)).lower()} "
-        f"use_llm={str(bool(client)).lower()}",
+        f"use_llm={str(bool(client)).lower()} "
+        f"transport={'websocket' if USE_WEBSOCKET else 'http'}",
         flush=True,
     )
     results: Dict[str, Dict[str, Any]] = {}
     for task_id in selected_tasks():
-        score, rewards = run_task(client, task_id)
-        results[task_id] = {"score": score, "rewards": rewards}
+        score, rewards, action_sources = run_task(client, task_id)
+        results[task_id] = {
+            "score": score,
+            "rewards": rewards,
+            "sources": action_sources,
+        }
 
     print("\n" + "=" * 72, flush=True)
-    print(f"{'task':<32} {'tier':<8} {'score':>8}  rewards", flush=True)
+    print(f"{'task':<32} {'tier':<8} {'score':>8}  {'sources':<20} rewards", flush=True)
     print("-" * 72, flush=True)
     for task_id, data in results.items():
         rewards_str = ", ".join(f"{reward:.2f}" for reward in data["rewards"])
+        source_counts = _format_source_counts(data["sources"])
         print(
             f"{task_id:<32} {TASK_TIERS[task_id]:<8} {data['score']:>8.3f}  "
-            f"[{rewards_str}]",
+            f"{source_counts:<20} [{rewards_str}]",
             flush=True,
         )
     print("=" * 72, flush=True)
