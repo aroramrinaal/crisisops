@@ -23,6 +23,19 @@
   pointer-events: none;
 }
 
+/* the stage holds everything that should zoom together (terrain,
+   routes, zones, dots, terrain-labels). Corner overlays + event
+   banner stay outside so they don't scale. */
+.map-stage {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 50%;
+  transition: transform 0.7s cubic-bezier(.2, .7, .2, 1);
+  will-change: transform;
+}
+
+.map-stage.aerial { transform: scale(0.7); }
+
 .map svg.terrain,
 .map svg.routes-overlay {
   position: absolute;
@@ -113,8 +126,8 @@
 
 .zone {
   position: absolute;
-  width: 96px;
-  height: 96px;
+  width: 82px;
+  height: 82px;
   transform: translate(-50%, -50%);
   pointer-events: none;
   z-index: 6;

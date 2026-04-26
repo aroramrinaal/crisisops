@@ -21,9 +21,10 @@
         <span id="step-counter" class="step-counter">STEP <b>00</b> / 26</span>
       </div>
       <div class="top-right">
-        <button id="btn-step"  class="btn">▷ STEP</button>
-        <button id="btn-reset" class="btn">⟳ RESET</button>
-        <button id="btn-play"  class="btn primary active">⏸ PAUSE</button>
+        <button id="btn-aerial" class="btn">⬚ AERIAL</button>
+        <button id="btn-step"   class="btn">▷ STEP</button>
+        <button id="btn-reset"  class="btn">⟳ RESET</button>
+        <button id="btn-play"   class="btn primary active">⏸ PAUSE</button>
       </div>
     </header>
 
@@ -64,6 +65,10 @@
       <div class="map-overlay br">
         <div><span class="k">CLOCK</span> &nbsp;<span class="v">T+00:14:32</span></div>
       </div>
+
+      <!-- everything inside .map-stage scales together when AERIAL is toggled.
+           corner overlays + event banner stay outside so they don't shrink. -->
+      <div id="map-stage" class="map-stage">
 
       <!-- terrain svg (zoomed-out aerial · large bay + coastline + mainland) -->
       <svg id="terrain" class="terrain" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -148,13 +153,15 @@
         <g id="routes"></g>
       </svg>
 
-      <!-- terrain HTML labels -->
-      <div class="terrain-label" style="left: 28%; top: 96%;">BAY OF MARA</div>
-      <div class="terrain-label" style="left: 6%;  top: 92%;">PIER 04</div>
+      <!-- terrain HTML labels (repositioned to avoid corner overlays + depot) -->
+      <div class="terrain-label" style="left: 50%; top: 95%;">BAY OF MARA</div>
       <div class="terrain-label" style="left: 60%; top: 78%;">PARK Q</div>
-      <div class="terrain-label" style="left: 92%; top: 6%;">HILLS · 240m</div>
+      <div class="terrain-label" style="left: 90%; top: 18%;">HILLS · 240m</div>
+      <div class="terrain-label" style="left: 16%; top: 30%;">FOB ALPHA</div>
 
       <!-- zones + unit dots get appended here by demo.js -->
+
+      </div><!-- /.map-stage -->
 
     </section>
 
@@ -188,18 +195,6 @@
         </div>
       </div>
     </aside>
-
-    <!-- ============================ BOTTOM STRIP ============================ -->
-    <footer class="bottom">
-      <div class="meta">
-        <span>CrisisOps</span>
-        <span>cascading_crisis · hard</span>
-        <span>5 zones · 10 reports · 6 units</span>
-      </div>
-      <div class="meta">
-        <span>seed 42</span>
-      </div>
-    </footer>
 
   </div>
 

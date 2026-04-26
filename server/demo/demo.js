@@ -14,7 +14,8 @@ const ZONES = {
 };
 
 // percent-of-map positions for unit dots (start = depot, deployed = zone)
-const DEPOT = { x: 8, y: 92 };
+// NW corner — clear of every terrain label, corner overlay, and zone
+const DEPOT = { x: 16, y: 30 };
 
 const UNITS = [
   { id: "rt-1", label: "RT-1", kind: "rescue_team",  short: "RT" },
@@ -130,7 +131,9 @@ function init() {
   els.btnPlay      = document.getElementById("btn-play");
   els.btnReset     = document.getElementById("btn-reset");
   els.btnStep      = document.getElementById("btn-step");
+  els.btnAerial    = document.getElementById("btn-aerial");
   els.mapPanel     = document.querySelector(".map");
+  els.mapStage     = document.getElementById("map-stage");
   els.terrain      = document.getElementById("terrain");
 
   buildUnits();
@@ -145,6 +148,11 @@ function init() {
   els.btnPlay.addEventListener("click", togglePlay);
   els.btnReset.addEventListener("click", reset);
   els.btnStep.addEventListener("click", () => { state.playing = false; setPlayBtn(); advance(); });
+  els.btnAerial.addEventListener("click", () => {
+    const on = els.mapStage.classList.toggle("aerial");
+    els.btnAerial.textContent = on ? "⬚ TACTICAL" : "⬚ AERIAL";
+    els.btnAerial.classList.toggle("active", on);
+  });
 
   if (state.playing) startTimer();
 }
@@ -181,7 +189,7 @@ function buildZones() {
       <div class="zone-sev" id="sev-${id}">SEV —</div>
       <div class="zone-tag">${z.tag}</div>
     `;
-    els.mapPanel.appendChild(el);
+    els.mapStage.appendChild(el);
   });
 }
 
@@ -231,11 +239,11 @@ function buildUnitDots() {
     dot.id = `dot-${u.id}`;
     dot.dataset.label = u.label;
     // splay depot starting positions slightly so they don't overlap
-    const dx = (idx % 3) * 2.2;
+    const dx = (idx % 3) * 2.5;
     const dy = Math.floor(idx / 3) * 3;
     dot.style.left = `${DEPOT.x + dx}%`;
-    dot.style.top  = `${DEPOT.y - dy}%`;
-    els.mapPanel.appendChild(dot);
+    dot.style.top  = `${DEPOT.y + dy}%`;
+    els.mapStage.appendChild(dot);
   });
 }
 
@@ -296,10 +304,10 @@ function reset() {
   document.querySelectorAll(".unit-chip").forEach(c => c.dataset.state = "idle");
   UNITS.forEach((u, idx) => {
     const dot = document.getElementById(`dot-${u.id}`);
-    const dx = (idx % 3) * 2.2;
+    const dx = (idx % 3) * 2.5;
     const dy = Math.floor(idx / 3) * 3;
     dot.style.left = `${DEPOT.x + dx}%`;
-    dot.style.top  = `${DEPOT.y - dy}%`;
+    dot.style.top  = `${DEPOT.y + dy}%`;
   });
   updateScore(0);
   refreshNextAction();

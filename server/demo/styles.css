@@ -54,12 +54,11 @@ html, body {
 
 .shell {
   display: grid;
-  grid-template-rows: 52px 1fr 28px;
+  grid-template-rows: 52px 1fr;
   grid-template-columns: 320px 1fr 360px;
   grid-template-areas:
     "top    top    top"
-    "left   map    right"
-    "bottom bottom bottom";
+    "left   map    right";
   height: 100vh; width: 100vw;
 }
 
@@ -67,7 +66,6 @@ html, body {
 .left   { grid-area: left; }
 .map    { grid-area: map; }
 .right  { grid-area: right; }
-.bottom { grid-area: bottom; }
 
 /* ---------- top bar (flat) ---------- */
 
@@ -130,24 +128,6 @@ html, body {
 .btn.primary { border-color: var(--amber); color: var(--amber); }
 .btn.primary.active { background: var(--amber); color: #0c0a04; }
 
-/* ---------- bottom strip ---------- */
-
-.bottom {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 20px;
-  background: var(--bg-1);
-  border-top: 1px solid var(--line);
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-3);
-  letter-spacing: 0.06em;
-}
-
-.bottom .meta { display: flex; gap: 22px; }
-.bottom .meta span { color: var(--text-2); }
-
 /* ---------- shared panel chrome ---------- */
 
 .panel {
@@ -175,11 +155,11 @@ html, body {
 .panel-body {
   flex: 1;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-2) transparent;
+  /* hide scrollbar entirely (still scrollable via wheel/trackpad) */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-.panel-body::-webkit-scrollbar { width: 4px; }
-.panel-body::-webkit-scrollbar-thumb { background: var(--line-2); }
+.panel-body::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
 .left  { border-right: 1px solid var(--line-2); }
 .right { border-left:  1px solid var(--line-2); }

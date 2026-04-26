@@ -177,11 +177,10 @@
   font-size: 12px;
   line-height: 1.65;
   background: var(--bg-0);
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-2) transparent;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-.log-body::-webkit-scrollbar { width: 4px; }
-.log-body::-webkit-scrollbar-thumb { background: var(--line-2); }
+.log-body::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
 .log-line {
   display: grid;
