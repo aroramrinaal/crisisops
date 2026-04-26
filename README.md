@@ -115,9 +115,7 @@ The exact training script is at [`training-scripts/simple-training-script.py`](t
 
 ## Results
 
-<!-- TRACKIO DASHBOARD SCREENSHOTS GO HERE -->
-<!-- 1 easy run + 2 medium runs from Trackio -->
-<!-- Caption each one: x-axis is GRPO step, y-axis is reward / loss -->
+<img width="1710" alt="Trackio GRPO dashboard — medium task run showing reward climbing, loss falling, KL divergence, grad norm, learning rate decay, completion length, and mean KL across ~200 steps" src="assets/trackio_dashboard.png" />
 
 *Reward and loss curves from the three GRPO runs (Trackio dashboard). The reward climbs steadily as the model learns to verify reports before allocating units and to publish coherent sitreps at the end of each episode.*
 
