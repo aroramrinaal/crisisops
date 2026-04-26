@@ -28,9 +28,7 @@ tags:
 - **Training scripts:** https://github.com/aroramrinaal/crisisops/tree/main/training-scripts
 - **2 Minute YouTube video:** https://youtu.be/9OPGw5CEAiM
 
-<img width="1710" height="897" alt="Screenshot 2026-04-26 at 4 07 40 PM" src="https://github.com/user-attachments/assets/becba5eb-b786-4b01-95c6-3397ddc45148" />
-
-[![CrisisOps 2-minute demo](https://img.youtube.com/vi/9OPGw5CEAiM/maxresdefault.jpg)](https://youtu.be/9OPGw5CEAiM)
+[![CrisisOps demo UI — click to watch the 2-minute walkthrough](https://github.com/user-attachments/assets/becba5eb-b786-4b01-95c6-3397ddc45148)](https://youtu.be/9OPGw5CEAiM)
 
 ## The problem
 
