@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CrisisOps · Cascading Crisis · AI Commander</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="panels.css" />
+  <link rel="stylesheet" href="map.css" />
+</head>
+<body>
+  <div class="shell">
+
+    <!-- ============================ TOP BAR ============================ -->
+    <header class="top">
+      <div class="top-left">
+        <span class="live-dot" title="live"></span>
+        <span class="scenario-name">Cascading Crisis</span>
+        <span class="tier-badge">HARD</span>
+      </div>
+      <div class="top-center">
+        <span id="step-counter" class="step-counter">STEP <b>00</b> / 26</span>
+      </div>
+      <div class="top-right">
+        <button id="btn-step"  class="btn">▷ STEP</button>
+        <button id="btn-reset" class="btn">⟳ RESET</button>
+        <button id="btn-play"  class="btn primary active">⏸ PAUSE</button>
+      </div>
+    </header>
+
+    <!-- ============================ LEFT PANEL ============================ -->
+    <aside class="left panel">
+      <div class="panel-header">
+        <span>Reports · Intel Feed</span>
+        <span class="count">SEEN <span id="reports-count">0 / 10</span></span>
+      </div>
+      <div class="panel-body">
+        <div id="reports-list" class="reports-list"><!-- cards stream in --></div>
+        <div class="units-block">
+          <div class="panel-header" style="padding:0;border:none;">
+            <span>Units · Available</span>
+            <span class="count">6 total</span>
+          </div>
+          <div id="units-grid" class="units-grid"></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ============================ MAP ============================ -->
+    <section class="map">
+
+      <!-- corner overlays -->
+      <div class="map-overlay tl">
+        <div><span class="k">DISTRICT</span> <span class="v">KIRAN VALLEY</span></div>
+        <div><span class="k">GRID</span> <span class="v">38T MR 4421 9087</span></div>
+      </div>
+      <div class="map-overlay tr">
+        <div><span class="k">SCENARIO</span> <span class="v">CASCADING_CRISIS</span></div>
+        <div><span class="k">SEED</span> <span class="v">42</span></div>
+      </div>
+      <div class="map-overlay bl">
+        <div><span class="k">SCALE</span> <span class="v">1 : 25 000</span></div>
+        <div><span class="k">N ↑</span></div>
+      </div>
+      <div class="map-overlay br">
+        <div><span class="k">CLOCK</span> <span class="v">T+00:14:32</span></div>
+        <div><span class="k">RULESET</span> <span class="v">v1.4</span></div>
+      </div>
+
+      <!-- terrain svg (background) -->
+      <svg id="terrain" class="terrain" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <!-- river / water bodies -->
+        <path class="t-water" d="M -2 42 C 6 56, 12 70, 14 86 L 6 102 L -2 102 Z" />
+        <path class="t-water" d="M 0 92 C 12 94, 22 97, 32 102 L -2 102 Z" />
+
+        <!-- urban patches -->
+        <rect class="t-urban"   x="28" y="42" width="20" height="20" />
+        <rect class="t-urban-2" x="30" y="62" width="14" height="10" />
+        <rect class="t-urban"   x="46" y="12" width="20" height="18" />
+        <rect class="t-urban-2" x="48" y="30" width="10" height="6" />
+        <rect class="t-urban-2" x="62" y="48" width="20" height="18" />
+        <rect class="t-urban"   x="64" y="66" width="12" height="6" />
+
+        <!-- hill / elevated terrain -->
+        <polygon class="t-hill" points="74,10 100,6 102,32 88,40 76,32" />
+        <polygon class="t-hill" points="78,38 96,36 100,46 84,48" />
+
+        <!-- parks / open ground -->
+        <ellipse class="t-park" cx="52" cy="78" rx="22" ry="9" />
+        <ellipse class="t-park" cx="22" cy="32" rx="14" ry="6" />
+
+        <!-- contour lines on hill -->
+        <path class="t-contour" d="M 78 14 Q 86 10, 96 14" />
+        <path class="t-contour" d="M 78 20 Q 86 16, 96 20" />
+        <path class="t-contour" d="M 78 26 Q 86 22, 96 26" />
+        <path class="t-contour" d="M 78 32 Q 86 28, 94 32" />
+
+        <!-- river bank line -->
+        <path class="t-water-line" d="M -2 42 C 6 56, 12 70, 14 86 L 8 100" />
+
+        <!-- main road network -->
+        <path class="t-road" d="M -2 78 L 18 78 L 30 70 L 38 56 L 46 40 L 52 26 L 64 22 L 84 26" />
+        <path class="t-road" d="M 36 52 L 54 50 L 70 54 L 84 50" />
+        <path class="t-road-thin" d="M 18 78 L 30 80 L 50 82 L 70 82 L 86 80" />
+        <path class="t-road-thin" d="M 52 22 L 70 30 L 84 26" />
+        <path class="t-road-thin" d="M 36 52 L 42 36 L 52 22" />
+        <path class="t-road-thin" d="M 70 56 L 78 64 L 84 70" />
+
+        <!-- rail line through rail-yard -->
+        <path class="t-rail" d="M 56 62 L 92 60" />
+        <path class="t-rail" d="M 60 50 L 78 48 L 88 42" />
+
+        <!-- terrain labels -->
+        <text class="t-label" x="2"  y="36">RIVER · MARA</text>
+        <text class="t-label" x="40" y="78">PARK Q</text>
+        <text class="t-label" x="78" y="8" >HILLS · 240m</text>
+        <text class="t-label" x="56" y="62">YARD</text>
+      </svg>
+
+      <!-- routes overlay (drawn dynamically by demo.js) -->
+      <svg class="routes-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <g id="routes"></g>
+      </svg>
+
+      <!-- zones + unit dots get appended here by demo.js -->
+
+    </section>
+
+    <!-- ============================ RIGHT PANEL ============================ -->
+    <aside class="right panel">
+      <div class="panel-header">
+        <span>Action Log · AI Commander</span>
+        <span class="count">deterministic</span>
+      </div>
+
+      <div class="log-shell">
+        <div id="log-body" class="log-body" aria-live="polite"></div>
+
+        <div class="next-action">
+          <div class="na-label">▶ Next Action</div>
+          <div id="na-verb"   class="na-verb">await_report</div>
+          <div id="na-detail" class="na-detail">incoming: r-1</div>
+          <div id="na-meta"   class="na-meta">
+            <span>priority: —</span><span>confidence: —</span>
+          </div>
+        </div>
+
+        <div class="score-block">
+          <div class="score-row">
+            <span>Live Grader Score</span>
+            <span id="score-val" class="value">0.000</span>
+          </div>
+          <div class="score-bar">
+            <div id="score-fill" class="score-fill"></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ============================ BOTTOM STRIP ============================ -->
+    <footer class="bottom">
+      <div class="meta">
+        <span>CrisisOps</span>
+        <span>OpenEnv RL Environment</span>
+        <span>Hard · cascading_crisis</span>
+        <span>5 zones · 10 reports · 6 units</span>
+      </div>
+      <div class="meta">
+        <span>build · demo</span>
+        <span>seed 42</span>
+        <span>v1.4</span>
+      </div>
+    </footer>
+
+  </div>
+
+  <script src="demo.js"></script>
+</body>
+</html>

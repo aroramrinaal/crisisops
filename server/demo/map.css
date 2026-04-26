@@ -1,0 +1,279 @@
+/* ============================================================
+   CrisisOps · map terrain, zones, roads, overlays
+   ============================================================ */
+
+.map {
+  position: relative;
+  background: radial-gradient(ellipse at 50% 40%, #0d1820 0%, #060a10 70%);
+  overflow: hidden;
+}
+
+/* faint coordinate grid */
+.map::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+}
+
+/* corner crosshair-style brackets */
+.map::after {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, var(--line-2) 24px, transparent 24px) top left / 24px 1px no-repeat,
+    linear-gradient(0deg,  var(--line-2) 24px, transparent 24px) top left / 1px 24px no-repeat,
+    linear-gradient(-90deg,var(--line-2) 24px, transparent 24px) top right / 24px 1px no-repeat,
+    linear-gradient(0deg,  var(--line-2) 24px, transparent 24px) top right / 1px 24px no-repeat,
+    linear-gradient(90deg, var(--line-2) 24px, transparent 24px) bottom left / 24px 1px no-repeat,
+    linear-gradient(180deg,var(--line-2) 24px, transparent 24px) bottom left / 1px 24px no-repeat,
+    linear-gradient(-90deg,var(--line-2) 24px, transparent 24px) bottom right / 24px 1px no-repeat,
+    linear-gradient(180deg,var(--line-2) 24px, transparent 24px) bottom right / 1px 24px no-repeat;
+}
+
+/* map svg fills full panel */
+.map svg.terrain,
+.map svg.routes-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.map svg.routes-overlay { z-index: 2; pointer-events: none; }
+
+/* keep strokes crisp despite preserveAspectRatio="none" stretching */
+.map svg * { vector-effect: non-scaling-stroke; }
+
+/* ---------- terrain palette (used inline by SVG via classes) ---------- */
+
+.t-water       { fill: #0e2a3d; opacity: 0.9; }
+.t-water-line  { stroke: #1a4a6e; stroke-width: 1; fill: none; opacity: 0.65; }
+.t-urban       { fill: #1a2128; }
+.t-urban-2     { fill: #1f2730; }
+.t-hill        { fill: #1c2820; }
+.t-park        { fill: #15241a; }
+.t-road        { stroke: #3a4654; stroke-width: 1.4; fill: none; }
+.t-road-thin   { stroke: #2a3540; stroke-width: 1; fill: none; opacity: 0.7; }
+.t-rail        { stroke: #4a5664; stroke-width: 1; fill: none; stroke-dasharray: 4 3; }
+.t-contour     { stroke: rgba(140, 180, 200, 0.06); stroke-width: 1; fill: none; }
+.t-label       {
+  fill: rgba(200, 220, 240, 0.35);
+  font-family: var(--mono, monospace);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+}
+
+/* ---------- inter-zone routes (rendered as svg lines on top) ---------- */
+
+.route {
+  stroke: rgba(255,255,255,0.18);
+  stroke-width: 1.2;
+  stroke-dasharray: 4 4;
+  fill: none;
+}
+
+.route[data-state="closed"] {
+  stroke: var(--red);
+  animation: route-flash 1.2s linear infinite;
+}
+
+@keyframes route-flash {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+/* ---------- zones ---------- */
+
+.zone {
+  position: absolute;
+  width: 90px;
+  height: 90px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.zone-box {
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--amber);
+  border-radius: 1px;
+  background: rgba(245, 158, 11, 0.04);
+  transition: all 0.3s;
+}
+
+.zone[data-severity="4"] .zone-box,
+.zone[data-severity="5"] .zone-box {
+  animation: zone-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes zone-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.45),
+                inset 0 0 12px rgba(245, 158, 11, 0.08);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(245, 158, 11, 0),
+                inset 0 0 18px rgba(245, 158, 11, 0.18);
+  }
+}
+
+.zone[data-state="active"] .zone-box {
+  border-color: var(--green);
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.zone[data-state="blocked"] .zone-box {
+  border-color: var(--red);
+  background: rgba(239, 68, 68, 0.06);
+  animation: none;
+}
+
+.zone[data-state="blocked"]::after {
+  content: "✕";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(239, 68, 68, 0.45);
+  font-size: 60px;
+  font-weight: 100;
+  font-family: var(--sans);
+  pointer-events: none;
+}
+
+.zone-label {
+  position: absolute;
+  top: -16px;
+  left: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: rgba(245, 158, 11, 0.85);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.zone[data-state="active"]  .zone-label { color: rgba(34, 197, 94, 0.9); }
+.zone[data-state="blocked"] .zone-label { color: rgba(239, 68, 68, 0.85); }
+
+.zone-tag {
+  position: absolute;
+  bottom: -16px;
+  right: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-3);
+  letter-spacing: 0.05em;
+}
+
+.zone-sev {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--amber);
+  background: rgba(0,0,0,0.4);
+  padding: 1px 4px;
+  border-radius: 1px;
+  letter-spacing: 0.05em;
+}
+.zone[data-state="active"]  .zone-sev { color: var(--green); }
+.zone[data-state="blocked"] .zone-sev { color: var(--red); }
+
+.zone-glyph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: rgba(245, 158, 11, 0.7);
+}
+.zone[data-state="active"]  .zone-glyph { color: rgba(34, 197, 94, 0.75); }
+.zone[data-state="blocked"] .zone-glyph { color: rgba(239, 68, 68, 0.55); }
+
+/* ---------- moving unit dots ---------- */
+
+.unit-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: var(--blue);
+  border: 1px solid #cdebff;
+  box-shadow: 0 0 8px var(--blue);
+  transition: top 1.2s cubic-bezier(.4,.1,.3,1), left 1.2s cubic-bezier(.4,.1,.3,1);
+  z-index: 4;
+}
+
+.unit-dot::after {
+  content: attr(data-label);
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--blue);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  text-shadow: 0 0 4px var(--bg-0);
+}
+
+/* ---------- map header / footer overlays ---------- */
+
+.map-overlay {
+  position: absolute;
+  z-index: 5;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-2);
+  letter-spacing: 0.12em;
+  pointer-events: none;
+}
+
+.map-overlay.tl { top: 16px; left: 20px; }
+.map-overlay.tr { top: 16px; right: 20px; text-align: right; }
+.map-overlay.bl { bottom: 16px; left: 20px; }
+.map-overlay.br { bottom: 16px; right: 20px; text-align: right; }
+
+.map-overlay .k { color: var(--text-3); }
+.map-overlay .v { color: var(--text-0); }
+
+/* event banner that flashes on aftershock / road_closure */
+.event-banner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(239, 68, 68, 0.95);
+  color: #1a0000;
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  padding: 14px 28px;
+  border-radius: 2px;
+  text-transform: uppercase;
+  z-index: 20;
+  pointer-events: none;
+  animation: banner-flash 1.6s ease-out forwards;
+  box-shadow: 0 0 40px rgba(239, 68, 68, 0.5);
+}
+
+@keyframes banner-flash {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+  10%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  85%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.05); }
+}
