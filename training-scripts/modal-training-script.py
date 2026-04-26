@@ -665,6 +665,8 @@ def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
             module.__dict__.setdefault(
                 "truncate_with_protected_tokens", truncate_with_protected_tokens
             )
+            module.__dict__.setdefault("has_images", False)
+            module.__dict__.setdefault("images", None)
             patched_scopes += 1
 
     method = getattr(trainer, "_generate_and_score_completions", None)
@@ -676,6 +678,8 @@ def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
                 globals_dict["truncate_with_protected_tokens"] = (
                     truncate_with_protected_tokens
                 )
+                globals_dict.setdefault("has_images", False)
+                globals_dict.setdefault("images", None)
                 patched_scopes += 1
             candidate = getattr(candidate, "__wrapped__", None)
 
