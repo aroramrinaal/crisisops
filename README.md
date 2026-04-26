@@ -15,10 +15,9 @@ tags:
 
 **An OpenEnv RL environment for training LLMs as crisis command operators.**
 
-Live demo: https://huggingface.co/spaces/mrinaalarora/crisisops
-Code: https://github.com/aroramrinaal/crisisops
+Live demo: https://huggingface.co/spaces/mrinaalarora/crisisops        Code: https://github.com/aroramrinaal/crisisops
 
----
+<img width="1710" height="897" alt="Screenshot 2026-04-26 at 4 07 40 PM" src="https://github.com/user-attachments/assets/becba5eb-b786-4b01-95c6-3397ddc45148" />
 
 ## The problem
 
