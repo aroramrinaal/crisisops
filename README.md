@@ -111,7 +111,7 @@ Three runs total:
 - 1 on easy (`single_zone_response`)
 - 2 on medium (`multi_zone_triage`)
 
-The exact training script is at [`training-scripts/simple-training-script.py`](training-scripts/simple-training-script.py), and the Modal wrapper is at [`training-scripts/modal-training-script.py`](training-scripts/modal-training-script.py).
+The exact training scripts are in [`training-scripts/`](https://github.com/aroramrinaal/crisisops/tree/main/training-scripts).
 
 ## Results
 
@@ -124,7 +124,7 @@ The exact training script is at [`training-scripts/simple-training-script.py`](t
 - **Hugging Face Space:** https://huggingface.co/spaces/mrinaalarora/crisisops
 - **GitHub repo:** https://github.com/aroramrinaal/crisisops
 - **Live demo UI:** https://mrinaalarora-crisisops.hf.space/demo
-- **Training notebook (Colab):** *to be added*
+- **Training scripts:** https://github.com/aroramrinaal/crisisops/tree/main/training-scripts
 - **Trackio dashboard:** https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden
 - **Blog / writeup:** *to be added*
 - **Earlier hackathon submissions:**
