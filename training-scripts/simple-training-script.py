@@ -96,6 +96,7 @@ GRPO_SAVE_STEPS = int(os.getenv("GRPO_SAVE_STEPS", "25"))
 GRPO_LORA_RANK = int(os.getenv("GRPO_LORA_RANK", "16"))
 GRPO_MAX_GRAD_NORM = float(os.getenv("GRPO_MAX_GRAD_NORM", "0.1"))
 MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "4096"))
+GRPO_TORCH_DTYPE = os.getenv("GRPO_TORCH_DTYPE", "float16").strip().lower()
 
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "crisisops-grpo-easy-lora").strip()
 HF_REPO_ID = os.getenv("HF_REPO_ID", "").strip() or None
@@ -541,6 +542,35 @@ def build_prompt_messages(task_id: str, obs: Mapping[str, Any]) -> List[Dict[str
 _METRICS: Optional[TrainingMetrics] = None
 
 
+def resolve_torch_dtype(torch_module):
+    if GRPO_TORCH_DTYPE in {"float16", "fp16", "half"}:
+        return torch_module.float16
+    if GRPO_TORCH_DTYPE in {"bfloat16", "bf16"}:
+        return torch_module.bfloat16
+    if GRPO_TORCH_DTYPE in {"float32", "fp32"}:
+        return torch_module.float32
+    if GRPO_TORCH_DTYPE in {"auto", "none", ""}:
+        return None
+    raise ValueError(
+        "GRPO_TORCH_DTYPE must be one of float16, bfloat16, float32, or auto; "
+        f"got {GRPO_TORCH_DTYPE!r}"
+    )
+
+
+def align_trainable_parameter_dtype(model: Any, dtype: Any) -> None:
+    if dtype is None:
+        return
+    converted = 0
+    for parameter in model.parameters():
+        if parameter.requires_grad and parameter.dtype != dtype:
+            parameter.data = parameter.data.to(dtype=dtype)
+            converted += parameter.numel()
+    print(
+        f"[TRAIN] trainable_parameter_dtype={dtype} converted_params={converted}",
+        flush=True,
+    )
+
+
 def _completion_text(completion: Any) -> str:
     """Normalize a completion to a string. TRL passes either str or [{role, content}]."""
     if isinstance(completion, str):
@@ -653,6 +683,31 @@ def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
     for attr in ("pad_token", "pad_token_id", "eos_token", "eos_token_id"):
         if not hasattr(trainer, attr) and hasattr(processing_class, attr):
             setattr(trainer, attr, getattr(processing_class, attr))
+    args = getattr(trainer, "args", None)
+    compatibility_defaults = {
+        "importance_sampling_level": "token",
+        "top_entropy_quantile": 1.0,
+        "vllm_importance_sampling_correction": False,
+        "vllm_importance_sampling_cap": 2.0,
+        "num_iterations": getattr(args, "num_iterations", 1),
+        "epsilon_low": getattr(args, "epsilon", 0.2),
+        "epsilon_high": (
+            getattr(args, "epsilon_high", None)
+            if getattr(args, "epsilon_high", None) is not None
+            else getattr(args, "epsilon", 0.2)
+        ),
+        "loss_type": getattr(args, "loss_type", "bnpo"),
+        "mask_truncated_completions": getattr(
+            args, "mask_truncated_completions", False
+        ),
+    }
+    for attr, value in compatibility_defaults.items():
+        if not hasattr(trainer, attr):
+            setattr(trainer, attr, value)
+    if getattr(trainer, "scale_rewards", None) is True:
+        trainer.scale_rewards = "group"
+    elif getattr(trainer, "scale_rewards", None) is False:
+        trainer.scale_rewards = "none"
 
     def truncate_with_protected_tokens(input_ids, attention_mask, max_length, protected):
         del protected
@@ -835,13 +890,16 @@ def main() -> None:
     # ---- Load model + LoRA via unsloth -----------------------------------
     from unsloth import FastLanguageModel
 
+    train_dtype = resolve_torch_dtype(torch)
     print(
-        f"[TRAIN] loading model={MODEL_ID} max_seq_length={MAX_SEQ_LENGTH}",
+        f"[TRAIN] loading model={MODEL_ID} max_seq_length={MAX_SEQ_LENGTH} "
+        f"torch_dtype={train_dtype}",
         flush=True,
     )
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=MODEL_ID,
         max_seq_length=MAX_SEQ_LENGTH,
+        dtype=train_dtype,
         load_in_4bit=True,
         fast_inference=False,
     )
@@ -864,6 +922,7 @@ def main() -> None:
         random_state=3407,
         use_rslora=False,
     )
+    align_trainable_parameter_dtype(model, train_dtype)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     print("[TRAIN] model loaded and LoRA adapter attached", flush=True)
@@ -939,7 +998,8 @@ def main() -> None:
         hub_strategy="every_save" if HF_REPO_ID else "end",
         report_to="trackio" if TRACKIO_SPACE_ID else "none",
         run_name=RUN_NAME,
-        bf16=True,
+        fp16=train_dtype is torch.float16,
+        bf16=train_dtype is torch.bfloat16,
     )
     grpo_config = GRPOConfig(**grpo_kwargs)
 
