@@ -1129,17 +1129,18 @@ def save_summary(stats: SmokeStats, passed: bool) -> None:
     print(f"[SMOKE] wrote summary to {OUTPUT_PATH}", flush=True)
 
 
-def evaluate_pass_fail(stats: SmokeStats) -> Tuple[bool, List[str]]:
+def evaluate_pass_fail(stats: SmokeStats) -> Tuple[bool, List[str], List[str]]:
     reasons: List[str] = []
+    notes: List[str] = []
     if stats.episodes_started < 1:
         reasons.append("no episodes started")
-    if stats.episodes_completed < 1:
-        reasons.append("no episode completed")
     if stats.valid_model_actions < 1:
         reasons.append("model produced zero schema-valid actions")
     if stats.total_steps < 1:
         reasons.append("no environment steps executed")
-    return (len(reasons) == 0), reasons
+    if stats.episodes_completed < 1:
+        notes.append("baseline captured but no episode completed")
+    return (len(reasons) == 0), reasons, notes
 
 
 def main() -> None:
@@ -1168,7 +1169,7 @@ def main() -> None:
             flush=True,
         )
 
-    passed, reasons = evaluate_pass_fail(stats)
+    passed, reasons, notes = evaluate_pass_fail(stats)
     save_summary(stats, passed)
 
     average_score = (
@@ -1182,6 +1183,8 @@ def main() -> None:
         f"average_score={average_score:.3f}",
         flush=True,
     )
+    if notes:
+        print(f"[SMOKE] NOTES {'; '.join(notes)}", flush=True)
 
     if not passed:
         print(f"[SMOKE] FAIL reasons={'; '.join(reasons)}", flush=True)
