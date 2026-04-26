@@ -998,7 +998,7 @@ def main() -> None:
         hub_strategy="every_save" if HF_REPO_ID else "end",
         report_to="trackio" if TRACKIO_SPACE_ID else "none",
         run_name=RUN_NAME,
-        fp16=train_dtype is torch.float16,
+        fp16=False,
         bf16=train_dtype is torch.bfloat16,
     )
     grpo_config = GRPOConfig(**grpo_kwargs)
