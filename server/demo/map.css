@@ -1,24 +1,24 @@
 /* ============================================================
    CrisisOps · map terrain — palantir flat-style aerial
-   no glows, no pulses, just clean cartography
+   black-background context, yellow operational state
    ============================================================ */
 
 /* ---------- map shell ---------- */
 
 .map {
   position: relative;
-  background: #1d2a23;          /* land base — dark olive */
+  background: #141a14;          /* dark olive land base */
   overflow: hidden;
 }
 
-/* very subtle coordinate grid (no glow) */
+/* very subtle coordinate grid */
 .map::before {
   content: "";
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(170, 200, 230, 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(170, 200, 230, 0.025) 1px, transparent 1px);
+    linear-gradient(rgba(220, 230, 240, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(220, 230, 240, 0.022) 1px, transparent 1px);
   background-size: 80px 80px;
   pointer-events: none;
 }
@@ -35,42 +35,43 @@
 
 /* ---------- terrain palette ---------- */
 
-.t-water       { fill: #0f3046; }
-.t-water-line  { stroke: #2a5d80; stroke-width: 0.8; fill: none; }
+.t-water       { fill: #0a2235; }
+.t-water-2     { fill: #0d2a40; }
+.t-water-line  { stroke: #2a597b; stroke-width: 0.7; fill: none; }
+.t-shoal       { fill: #133246; opacity: 0.7; }
 
-.t-land        { fill: #1f2a23; }
-.t-veg         { fill: #18281d; }
-.t-veg-2       { fill: #1c2c1f; }
+.t-veg         { fill: #131e15; }
+.t-veg-2       { fill: #182520; }
 
-.t-urban       { fill: #2e3829; }
-.t-urban-2     { fill: #353e2c; }
+.t-urban       { fill: #1f261c; }
+.t-urban-2     { fill: #232b1f; }
 
-.t-hill        { fill: #1f2722; }
-.t-contour     { stroke: rgba(170, 195, 215, 0.07); stroke-width: 0.6; fill: none; }
+.t-hill        { fill: #16201a; }
+.t-contour     { stroke: rgba(190, 210, 220, 0.06); stroke-width: 0.5; fill: none; }
 
-.t-road        { stroke: #b8c2cc; stroke-width: 1.2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
-.t-road-thin   { stroke: #6f7a86; stroke-width: 0.7; fill: none; opacity: 0.85; }
+.t-road        { stroke: #c8d0d8; stroke-width: 1.0; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.t-road-thin   { stroke: #6f7a86; stroke-width: 0.6; fill: none; opacity: 0.85; }
+.t-road-dirt   { stroke: #6a6055; stroke-width: 0.5; fill: none; stroke-dasharray: 1.2 1.0; opacity: 0.7; }
 .t-rail        { stroke: #8f97a3; stroke-width: 0.7; fill: none; stroke-dasharray: 1.5 1.2; }
 
-/* yellow compound outline — palantir signature */
-.t-compound    { fill: none; stroke: #c9a13a; stroke-width: 0.8; stroke-dasharray: 0.6 0.9; opacity: 0.55; }
+.t-compound    { fill: none; stroke: #c9a13a; stroke-width: 0.7; stroke-dasharray: 0.6 0.9; opacity: 0.55; }
 
-/* building cluster rects (rendered by JS) */
-.t-bldg        { fill: #4a4536; stroke: #2a2820; stroke-width: 0.15; }
-.t-bldg-warm   { fill: #54483a; stroke: #2a2820; stroke-width: 0.15; }
+.t-bldg        { fill: #3d3a2c; stroke: #1a1812; stroke-width: 0.12; }
+.t-bldg-warm   { fill: #463d2e; stroke: #1a1812; stroke-width: 0.12; }
+.t-bldg-cool   { fill: #2e3438; stroke: #131618; stroke-width: 0.12; }
 
 /* ---------- routes between zones ---------- */
 
 .route {
-  stroke: rgba(220, 235, 250, 0.25);
-  stroke-width: 0.6;
+  stroke: rgba(220, 235, 250, 0.22);
+  stroke-width: 0.5;
   stroke-dasharray: 2 2;
   fill: none;
 }
 
 .route[data-state="closed"] {
   stroke: var(--red);
-  stroke-width: 0.9;
+  stroke-width: 0.8;
   opacity: 0.85;
 }
 
@@ -95,13 +96,12 @@
 .map-overlay .k { color: var(--text-3); }
 .map-overlay .v { color: var(--text-0); font-weight: 500; }
 
-/* small labelled terrain markers (HTML, positioned by %) */
 .terrain-label {
   position: absolute;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.18em;
-  color: rgba(170, 195, 215, 0.28);
+  color: rgba(190, 210, 220, 0.28);
   text-transform: uppercase;
   pointer-events: none;
   transform: translate(-50%, -50%);
@@ -127,18 +127,20 @@
   background: rgba(224, 169, 58, 0.04);
 }
 
+/* ACTIVE = yellow (was green) */
 .zone[data-state="active"] .zone-box {
-  border-color: var(--green);
-  background: rgba(108, 179, 113, 0.05);
+  border-color: var(--yellow);
+  background: rgba(245, 204, 64, 0.07);
+  border-width: 2px;
 }
 
+/* BLOCKED = red */
 .zone[data-state="blocked"] .zone-box {
   border-color: var(--red);
   background: rgba(208, 77, 77, 0.06);
-  border-style: solid;
 }
 
-/* corner ticks on zone box (palantir-style) */
+/* L-bracket corner ticks */
 .zone-box::before, .zone-box::after {
   content: "";
   position: absolute;
@@ -146,7 +148,7 @@
   border: 1.5px solid currentColor;
   color: var(--amber);
 }
-.zone[data-state="active"]  .zone-box::before, .zone[data-state="active"]  .zone-box::after { color: var(--green); }
+.zone[data-state="active"]  .zone-box::before, .zone[data-state="active"]  .zone-box::after { color: var(--yellow); }
 .zone[data-state="blocked"] .zone-box::before, .zone[data-state="blocked"] .zone-box::after { color: var(--red); }
 
 .zone-box::before {
@@ -179,7 +181,7 @@
   text-transform: uppercase;
   white-space: nowrap;
 }
-.zone[data-state="active"]  .zone-label { color: var(--green); }
+.zone[data-state="active"]  .zone-label { color: var(--yellow); }
 .zone[data-state="blocked"] .zone-label { color: var(--red); }
 
 .zone-tag {
@@ -198,14 +200,14 @@
   font-size: 10px;
   font-weight: 700;
   color: var(--amber);
-  background: rgba(7, 16, 28, 0.8);
+  background: rgba(0, 0, 0, 0.78);
   padding: 1px 5px;
   letter-spacing: 0.05em;
 }
-.zone[data-state="active"]  .zone-sev { color: var(--green); }
+.zone[data-state="active"]  .zone-sev { color: var(--yellow); }
 .zone[data-state="blocked"] .zone-sev { color: var(--red); }
 
-.zone-glyph { display: none; } /* removed — too cartoony */
+.zone-glyph { display: none; }
 
 /* ---------- unit dots ---------- */
 
@@ -232,7 +234,7 @@
   white-space: nowrap;
 }
 
-/* ---------- event banner (no glow, sharp edges) ---------- */
+/* ---------- event banner (no glow) ---------- */
 
 .event-banner {
   position: absolute;

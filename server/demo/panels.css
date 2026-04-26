@@ -157,14 +157,20 @@
 
 /* ---------- right: action log ---------- */
 
+/* the right panel is a flex column. log-shell must claim the
+   remaining space and itself be a flex column so the score block
+   can pin to the bottom while the log scrolls. min-height:0 is
+   the magic that lets nested flex items actually scroll. */
 .log-shell {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
 }
 
 .log-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 10px 14px;
   font-family: var(--mono);
@@ -281,6 +287,6 @@
 .score-fill {
   position: absolute;
   inset: 0 100% 0 0;
-  background: var(--green);
+  background: var(--yellow);
   transition: right 0.5s cubic-bezier(.2,.8,.2,1);
 }

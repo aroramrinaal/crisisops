@@ -4,32 +4,34 @@
    ============================================================ */
 
 :root {
-  /* deep navy palette */
-  --bg-0: #07101c;
-  --bg-1: #0b1828;
-  --bg-2: #11253a;
-  --bg-3: #1a3149;
-  --line:   rgba(170, 200, 230, 0.06);
-  --line-2: rgba(170, 200, 230, 0.13);
-  --line-3: rgba(170, 200, 230, 0.22);
+  /* pure black, neutral greys for cards */
+  --bg-0: #000000;
+  --bg-1: #0a0a0c;
+  --bg-2: #131318;
+  --bg-3: #1c1c24;
+  --line:   rgba(220, 230, 240, 0.05);
+  --line-2: rgba(220, 230, 240, 0.11);
+  --line-3: rgba(220, 230, 240, 0.20);
 
   /* text */
-  --text-0: #e8eef4;
-  --text-1: #b6c2cf;
-  --text-2: #7c8a98;
-  --text-3: #5a6776;
+  --text-0: #e8eaee;
+  --text-1: #b4b8c0;
+  --text-2: #74787f;
+  --text-3: #4a4d54;
 
   /* status — flat, no glow */
-  --amber: #e0a93a;
+  --amber:  #e0a93a;
+  --yellow: #f5cc40;
   --orange: #d97a2a;
-  --green: #6cb371;
-  --red: #d04d4d;
-  --blue: #4ea6d8;
+  --green:  #6cb371;
+  --red:    #d04d4d;
+  --blue:   #4ea6d8;
 
-  --amber-dim: rgba(224, 169, 58, 0.10);
-  --green-dim: rgba(108, 179, 113, 0.12);
-  --red-dim:   rgba(208,  77,  77, 0.12);
-  --blue-dim:  rgba( 78, 166, 216, 0.12);
+  --amber-dim:  rgba(224, 169,  58, 0.10);
+  --yellow-dim: rgba(245, 204,  64, 0.10);
+  --green-dim:  rgba(108, 179, 113, 0.12);
+  --red-dim:    rgba(208,  77,  77, 0.12);
+  --blue-dim:   rgba( 78, 166, 216, 0.12);
 
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
