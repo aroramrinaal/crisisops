@@ -27,6 +27,7 @@ hf jobs uv run \
   -e TASK_ID="${TASK_ID:-single_zone_response}" \
   -e MODEL_ID="${MODEL_ID:-unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit}" \
   -e GRPO_MAX_STEPS="${GRPO_MAX_STEPS:-100}" \
+  -e GRPO_PER_DEVICE_BATCH="${GRPO_PER_DEVICE_BATCH:-3}" \
   -e HF_REPO_ID="${HF_REPO_ID:-mrinaalarora/crisisops-grpo-easy-lora}" \
   -e TRACKIO_SPACE_ID="${TRACKIO_SPACE_ID:-mrinaalarora/crisisops-grpo-trackio}" \
   training-scripts/simple-training-script.py

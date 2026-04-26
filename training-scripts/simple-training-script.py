@@ -76,15 +76,15 @@ ENV_URL = os.getenv("ENV_URL", "https://mrinaalarora-crisisops.hf.space").rstrip
 MODEL_ID = os.getenv("MODEL_ID", "unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit").strip()
 TASK_ID = os.getenv("TASK_ID", "single_zone_response").strip()
 
-# Training scale. 100 GRPO steps with the sizing below = 100 weight updates and
-# 100 * 4 (grad_accum) * 2 (per-device batch) * 4 (num_generations) = 3200
-# one-step reward calls against the live HF Space.
+# Training scale. 100 GRPO steps with the sizing below = 100 weight updates.
+# With grad_accum=4, per-device batch=3, and num_generations=4, Unsloth sees
+# 3 unique prompts per generation cycle, satisfying its >2 prompt guidance.
 GRPO_MAX_STEPS = int(os.getenv("GRPO_MAX_STEPS", "100"))
 GRPO_NUM_GENERATIONS = int(os.getenv("GRPO_NUM_GENERATIONS", "4"))
-GRPO_PER_DEVICE_BATCH = int(os.getenv("GRPO_PER_DEVICE_BATCH", "2"))
+GRPO_PER_DEVICE_BATCH = int(os.getenv("GRPO_PER_DEVICE_BATCH", "3"))
 GRPO_GRAD_ACCUM = int(os.getenv("GRPO_GRAD_ACCUM", "4"))
 GRPO_LEARNING_RATE = float(os.getenv("GRPO_LEARNING_RATE", "5e-6"))
-GRPO_BETA = float(os.getenv("GRPO_BETA", "0.04"))
+GRPO_BETA = float(os.getenv("GRPO_BETA", "0.0"))
 GRPO_TEMPERATURE = float(os.getenv("GRPO_TEMPERATURE", "0.9"))
 GRPO_TOP_P = float(os.getenv("GRPO_TOP_P", "0.95"))
 GRPO_MAX_PROMPT_LENGTH = int(os.getenv("GRPO_MAX_PROMPT_LENGTH", "3072"))
@@ -93,6 +93,7 @@ GRPO_WARMUP_STEPS = int(os.getenv("GRPO_WARMUP_STEPS", "5"))
 GRPO_LOGGING_STEPS = int(os.getenv("GRPO_LOGGING_STEPS", "1"))
 GRPO_SAVE_STEPS = int(os.getenv("GRPO_SAVE_STEPS", "25"))
 GRPO_LORA_RANK = int(os.getenv("GRPO_LORA_RANK", "16"))
+GRPO_MAX_GRAD_NORM = float(os.getenv("GRPO_MAX_GRAD_NORM", "0.1"))
 MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "4096"))
 
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "crisisops-grpo-easy-lora").strip()
@@ -637,6 +638,31 @@ def make_pool_metric_callback():
     return PoolMetricCallback
 
 
+def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
+    """Patch text-only compatibility gaps in Unsloth's generated GRPO trainer."""
+    for attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
+        if not hasattr(trainer, attr):
+            setattr(trainer, attr, None)
+
+    method = getattr(trainer, "_generate_and_score_completions", None)
+    func = getattr(method, "__func__", method)
+    globals_dict = getattr(func, "__globals__", None)
+    if not isinstance(globals_dict, dict):
+        return
+    if "truncate_with_protected_tokens" in globals_dict:
+        return
+
+    def truncate_with_protected_tokens(input_ids, attention_mask, max_length, protected):
+        del protected
+        if max_length is None:
+            return input_ids, attention_mask
+        if input_ids.shape[-1] <= max_length:
+            return input_ids, attention_mask
+        return input_ids[..., -max_length:], attention_mask[..., -max_length:]
+
+    globals_dict["truncate_with_protected_tokens"] = truncate_with_protected_tokens
+
+
 # --------------------------------------------------------------------------- #
 # CUDA / GPU sanity (carry over from the smoke test so HF Job logs are useful)
 # --------------------------------------------------------------------------- #
@@ -721,6 +747,7 @@ def main() -> None:
         model_name=MODEL_ID,
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=True,
+        fast_inference=False,
     )
     model = FastLanguageModel.get_peft_model(
         model,
@@ -795,6 +822,8 @@ def main() -> None:
         max_steps=GRPO_MAX_STEPS,
         learning_rate=GRPO_LEARNING_RATE,
         beta=GRPO_BETA,
+        optim="paged_adamw_8bit",
+        max_grad_norm=GRPO_MAX_GRAD_NORM,
         per_device_train_batch_size=GRPO_PER_DEVICE_BATCH,
         gradient_accumulation_steps=GRPO_GRAD_ACCUM,
         num_generations=GRPO_NUM_GENERATIONS,
@@ -828,11 +857,7 @@ def main() -> None:
         train_dataset=train_dataset,
         callbacks=[PoolMetricCallback()],
     )
-    # Unsloth's patched GRPO trainer currently reads these vision fields even
-    # for text-only models on some dependency combinations.
-    for attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
-        if not hasattr(trainer, attr):
-            setattr(trainer, attr, None)
+    patch_text_only_unsloth_grpo_trainer(trainer)
 
     # ---- Train -------------------------------------------------------------
     start_mem = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
