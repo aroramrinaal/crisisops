@@ -1,5 +1,5 @@
 """
-Minimal HF Jobs smoke test for CrisisOps + Unsloth on a single GPU.
+Infrastructure smoke test for CrisisOps + Unsloth on a single GPU.
 
 This is intentionally not a real RL training run. It checks the wiring that
 matters before we spend credits on GRPO:
@@ -22,7 +22,7 @@ hf jobs uv run \
   --with bitsandbytes \
   --with peft \
   --with torch \
-  smoke_test_unsloth_crisisops.py
+  infra_smoke_test_unsloth_crisisops.py
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "4096"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "256"))
 SMOKE_EPISODES = int(os.getenv("SMOKE_EPISODES", "2"))
 MAX_EPISODE_TURNS = int(os.getenv("MAX_EPISODE_TURNS", "8"))
-OUTPUT_PATH = os.getenv("SMOKE_OUTPUT_PATH", "smoke_test_summary.json").strip()
+OUTPUT_PATH = os.getenv("SMOKE_OUTPUT_PATH", "infra_smoke_test_summary.json").strip()
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.0"))
 TOP_P = float(os.getenv("TOP_P", "0.95"))
 SHOW_MODEL_TEXT = os.getenv("SHOW_MODEL_TEXT", "0").strip().lower() in {
