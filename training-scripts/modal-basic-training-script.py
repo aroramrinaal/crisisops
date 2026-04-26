@@ -54,7 +54,7 @@ app = modal.App("crisisops-grpo-basic", image=image)
     secrets=[modal.Secret.from_name("huggingface-secret")],
     cpu=8,
     memory=32768,
-    ephemeral_disk=262144,
+    ephemeral_disk=524288,
     timeout=4 * 60 * 60,
 )
 def run_training(

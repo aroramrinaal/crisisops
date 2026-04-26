@@ -644,6 +644,10 @@ def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
     for attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
         if not hasattr(trainer, attr):
             setattr(trainer, attr, None)
+    processing_class = getattr(trainer, "processing_class", None)
+    for attr in ("pad_token", "pad_token_id", "eos_token", "eos_token_id"):
+        if not hasattr(trainer, attr) and hasattr(processing_class, attr):
+            setattr(trainer, attr, getattr(processing_class, attr))
 
     def truncate_with_protected_tokens(input_ids, attention_mask, max_length, protected):
         del protected
