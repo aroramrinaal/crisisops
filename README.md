@@ -17,7 +17,7 @@ tags:
 
 ## Links
 
-- **Blog / writeup:** *to be added*
+- **Blog / writeup:** Coming soon on arorarminaal.com/ai
 - **Earlier hackathon submissions:**
   - [DryLabSim](https://huggingface.co/spaces/mrinaalarora/drylabsim)
   - [json_cleaning_env](https://huggingface.co/spaces/mrinaalarora/json-cleaning-env)
