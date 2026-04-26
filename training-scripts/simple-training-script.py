@@ -700,7 +700,7 @@ def log_gpu_preflight() -> None:
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=name,driver_version,cuda_version",
+                "--query-gpu=name,driver_version",
                 "--format=csv,noheader",
             ],
             check=False,
@@ -716,27 +716,40 @@ def log_gpu_preflight() -> None:
 
 def wait_for_cuda_runtime() -> None:
     """Wait for CUDA in child processes so failed probes do not poison training."""
-    retries = int(os.getenv("CUDA_WAIT_RETRIES", "30"))
+    retries = int(os.getenv("CUDA_WAIT_RETRIES", "60"))
     sleep_seconds = int(os.getenv("CUDA_WAIT_SLEEP_SECONDS", "10"))
+    probe_timeout = int(os.getenv("CUDA_PROBE_TIMEOUT", "30"))
     last_error: Optional[str] = None
     for attempt in range(1, retries + 1):
-        probe = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import os, torch; "
-                    "print('torch_version=' + torch.__version__); "
-                    "print('cuda_visible_devices=' + str(os.environ.get('CUDA_VISIBLE_DEVICES'))); "
-                    "torch.cuda.init(); "
-                    "print('device_count=' + str(torch.cuda.device_count())); "
-                    "print('device_name=' + torch.cuda.get_device_name(0))"
-                ),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os, torch; "
+                        "print('torch_version=' + torch.__version__); "
+                        "print('cuda_visible_devices=' + str(os.environ.get('CUDA_VISIBLE_DEVICES'))); "
+                        "torch.cuda.init(); "
+                        "print('device_count=' + str(torch.cuda.device_count())); "
+                        "print('device_name=' + torch.cuda.get_device_name(0))"
+                    ),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=probe_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            last_error = f"probe timed out after {probe_timeout}s"
+            print(
+                f"[TRAIN] cuda_not_ready attempt={attempt}/{retries} "
+                f"sleep_seconds={sleep_seconds} last_error={last_error}",
+                flush=True,
+            )
+            if attempt < retries:
+                time.sleep(sleep_seconds)
+            continue
         if probe.returncode == 0:
             output = (probe.stdout or "").strip()
             print(f"[TRAIN] cuda_ready probe={output}", flush=True)
