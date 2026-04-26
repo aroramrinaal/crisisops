@@ -26,7 +26,7 @@ tags:
 - **Live demo UI:** https://mrinaalarora-crisisops.hf.space/demo
 - **Trackio dashboard:** https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden
 - **Training scripts:** https://github.com/aroramrinaal/crisisops/tree/main/training-scripts
-- **YouTube video:** https://youtu.be/9OPGw5CEAiM
+- **2 Minute YouTube video:** https://youtu.be/9OPGw5CEAiM
 
 <img width="1710" height="897" alt="Screenshot 2026-04-26 at 4 07 40 PM" src="https://github.com/user-attachments/assets/becba5eb-b786-4b01-95c6-3397ddc45148" />
 
