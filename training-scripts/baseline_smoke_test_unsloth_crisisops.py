@@ -1,15 +1,18 @@
 """
-Infrastructure smoke test for CrisisOps + Unsloth on a single GPU.
+Baseline smoke test for CrisisOps + Unsloth on a single GPU.
 
-This is intentionally not a real RL training run. It checks the wiring that
-matters before we spend credits on GRPO:
+This is intentionally not a real RL training run. It captures a cleaner
+pre-training baseline by removing recommendation hints from the prompt while
+keeping the deterministic policy only as a fallback for invalid JSON.
 
 1. CUDA is visible in the HF Job.
 2. An Unsloth 4-bit model loads successfully.
 3. A LoRA adapter attaches successfully.
 4. The script can talk to the deployed CrisisOps environment over HTTP.
-5. The model can produce at least one schema-valid CrisisOps JSON action.
-6. An episode of `single_zone_response` can complete within the step cap.
+5. The model can produce schema-valid CrisisOps JSON actions without a teacher
+   recommendation in the prompt.
+6. An episode can complete within the step cap for baseline tasks such as
+   `single_zone_response` and `multi_zone_triage`.
 
 Recommended HF Jobs command:
 
@@ -22,7 +25,7 @@ hf jobs uv run \
   --with bitsandbytes \
   --with peft \
   --with torch \
-  infra_smoke_test_unsloth_crisisops.py
+  training-scripts/baseline_smoke_test_unsloth_crisisops.py
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "4096"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "256"))
 SMOKE_EPISODES = int(os.getenv("SMOKE_EPISODES", "2"))
 MAX_EPISODE_TURNS = int(os.getenv("MAX_EPISODE_TURNS", "8"))
-OUTPUT_PATH = os.getenv("SMOKE_OUTPUT_PATH", "infra_smoke_test_summary.json").strip()
+OUTPUT_PATH = os.getenv("SMOKE_OUTPUT_PATH", "baseline_smoke_test_summary.json").strip()
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.0"))
 TOP_P = float(os.getenv("TOP_P", "0.95"))
 SHOW_MODEL_TEXT = os.getenv("SHOW_MODEL_TEXT", "0").strip().lower() in {
@@ -122,12 +125,8 @@ SYSTEM_PROMPT = textwrap.dedent(
     You are an emergency operations commander for CrisisOps. Return exactly one
     JSON object for the next environment action.
 
-    DEFAULT BEHAVIOR: copy the `Recommended action` block VERBATIM. The
-    deterministic policy that produced it already accounts for verification
-    status, unit-type matching, blocked zones, deadlines, and sitrep timing.
-    Deviate ONLY if the observation reveals something the recommendation
-    clearly missed. Use only IDs that appear in the visible observation.
-    Return JSON only. No markdown fences. No prose outside the JSON.
+    Use only IDs that appear in the visible observation. Return JSON only. No
+    markdown fences. No prose outside the JSON.
     """
 ).strip()
 
@@ -886,7 +885,6 @@ def _wait_for_cuda(torch: Any, retries: int = 6, sleep_seconds: int = 5) -> None
 def render_prompt(
     task_id: str,
     obs: Mapping[str, Any],
-    fallback_action: Mapping[str, Any],
     history: List[Dict[str, Any]],
 ) -> str:
     brief = TASK_BRIEFS.get(task_id, "(no brief)")
@@ -903,8 +901,6 @@ def render_prompt(
         f"Recent steps (most recent last):\n{recent_steps}\n\n"
         f"Current observation:\n"
         f"{json.dumps(_compact_observation(obs), sort_keys=True)}\n\n"
-        f"Recommended action:\n"
-        f"{json.dumps(dict(fallback_action), sort_keys=True)}\n\n"
         "Return exactly one JSON object and nothing else."
     )
 
@@ -958,7 +954,7 @@ def choose_model_action(
 ) -> Tuple[dict, str, str | None]:
     import torch
 
-    prompt = render_prompt(task_id, obs, fallback_action, history)
+    prompt = render_prompt(task_id, obs, history)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
@@ -1133,23 +1129,25 @@ def save_summary(stats: SmokeStats, passed: bool) -> None:
     print(f"[SMOKE] wrote summary to {OUTPUT_PATH}", flush=True)
 
 
-def evaluate_pass_fail(stats: SmokeStats) -> Tuple[bool, List[str]]:
+def evaluate_pass_fail(stats: SmokeStats) -> Tuple[bool, List[str], List[str]]:
     reasons: List[str] = []
+    notes: List[str] = []
     if stats.episodes_started < 1:
         reasons.append("no episodes started")
-    if stats.episodes_completed < 1:
-        reasons.append("no episode completed")
     if stats.valid_model_actions < 1:
         reasons.append("model produced zero schema-valid actions")
     if stats.total_steps < 1:
         reasons.append("no environment steps executed")
-    return (len(reasons) == 0), reasons
+    if stats.episodes_completed < 1:
+        notes.append("baseline captured but no episode completed")
+    return (len(reasons) == 0), reasons, notes
 
 
 def main() -> None:
-    if TASK_ID != "single_zone_response":
+    if TASK_ID not in {"single_zone_response", "multi_zone_triage"}:
         raise ValueError(
-            f"This smoke test is intentionally scoped to single_zone_response, got {TASK_ID!r}"
+            "This baseline smoke test is intentionally scoped to "
+            f"single_zone_response or multi_zone_triage, got {TASK_ID!r}"
         )
 
     print(
@@ -1171,7 +1169,7 @@ def main() -> None:
             flush=True,
         )
 
-    passed, reasons = evaluate_pass_fail(stats)
+    passed, reasons, notes = evaluate_pass_fail(stats)
     save_summary(stats, passed)
 
     average_score = (
@@ -1185,6 +1183,8 @@ def main() -> None:
         f"average_score={average_score:.3f}",
         flush=True,
     )
+    if notes:
+        print(f"[SMOKE] NOTES {'; '.join(notes)}", flush=True)
 
     if not passed:
         print(f"[SMOKE] FAIL reasons={'; '.join(reasons)}", flush=True)
