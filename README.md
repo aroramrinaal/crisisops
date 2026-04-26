@@ -11,248 +11,131 @@ tags:
   - openenv
 ---
 
-# Crisisops Environment
+# CrisisOps
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+**An OpenEnv RL environment for training LLMs as crisis command operators.**
 
-The browser entrypoint is a custom HTML demo at `/demo`. The root route redirects
-there so deployed Spaces open the demo directly instead of OpenEnv's default
-Gradio UI.
+Live demo: https://huggingface.co/spaces/mrinaalarora/crisisops
+Code: https://github.com/aroramrinaal/crisisops
 
-## Quick Start
+---
 
-The simplest way to use the Crisisops environment is through the `CrisisopsEnv` class:
+## The problem
 
-```python
-from crisisops import CrisisopsAction, CrisisopsEnv
+When a disaster hits a city, the people in the operations center don't get clean inputs. They get a flood of noisy citizen reports, half-confirmed sensor pings, and contradicting official updates streaming in over hours. They have to figure out what's actually happening, who to send where, what to evacuate, what to ignore, and they have to do it before deadlines tick down. Mistakes cost lives.
 
-try:
-    # Create environment from Docker image
-    crisisopsenv = CrisisopsEnv.from_docker_image("crisisops-env:latest")
+Today's frontier LLMs are surprisingly bad at this. They're great at one-shot answers, but they fall apart when you ask them to track state across a long, partially observable situation, weigh false alarms against real incidents, and make irreversible commitments under time pressure. There's no good RL environment to train them on this either, most public envs are toy games or single-turn benchmarks.
 
-    # Reset
-    result = crisisopsenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
+So I built one.
 
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
+## How CrisisOps got here
 
-    for msg in messages:
-        result = crisisopsenv.step(CrisisopsAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
+I started this hackathon two months into self-teaching ML, going solo. My first submission was [json_cleaning_env](https://github.com/aroramrinaal/json_cleaning_env), a data-cleaning environment that got me through the validator and taught me OpenEnv's spec. My second was [DryLabSim](https://huggingface.co/spaces/mrinaalarora/drylabsim), a biology dry lab where LLMs run computational experiments. Both passed Phase 1 and Phase 2 and got me into the in-person final round in Bangalore.
 
-finally:
-    # Always clean up
-    crisisopsenv.close()
-```
+For the final, I wanted something that pushed harder on what LLMs actually struggle with: long-horizon planning under uncertainty, with real consequences for getting it wrong. Crisis command was the obvious target. It's a real job humans do, the cost of bad decisions is concrete, and there's a clean reward signal hiding inside it (verify before acting, match resources to incidents, hit deadlines, don't trust everything you read).
 
-That's it! The `CrisisopsEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
+CrisisOps is the result.
 
-## Building the Docker Image
+## What the environment does
 
-Before using the environment, you need to build the Docker image:
+The agent plays the role of an emergency operations commander. At every step it sees:
 
-```bash
-# From project root
-docker build -t crisisops-env:latest -f server/Dockerfile .
-```
+- **Visible zones** (incident locations with severity, population at risk, deadlines, access status)
+- **Reports** streaming in from citizens, sensors, officials, field teams, and media (with confidence levels)
+- **Resources** — limited rescue teams, medical units, supply trucks, evac buses, recon drones
+- **An incident log** of what happened recently
 
-## Deploying to Hugging Face Spaces
+It picks one of ten actions: `verify_report`, `flag_false_alarm`, `allocate_unit`, `request_recon`, `reroute_unit`, `issue_evacuation`, `open_shelter`, `dispatch_supplies`, `publish_sitrep`, or `noop`.
 
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
+The reward function rewards the things that matter in a real crisis room: verifying noisy reports before committing units, matching the right unit type to each incident, resolving critical zones before their deadlines, flagging false alarms, and publishing a clean situation report when the dust settles. It penalizes the things that get people killed: acting on unverified reports, sending the wrong unit, targeting blocked zones, missing deadlines.
 
-```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
+## Four difficulty tiers
 
-# Or specify options
-openenv push --namespace my-org --private
-```
+| Tier | Task ID | Zones | Reports | Episode cap | Key challenge |
+|------|---------|-------|---------|-------------|---------------|
+| Easy | `single_zone_response` | 1 | 3 | 8 | Verify, allocate, sitrep |
+| Medium | `multi_zone_triage` | 3 | 6 | 15 | Concurrent zones, false alarms |
+| Hard | `cascading_crisis` | 5 | 10 | 25 | Mid-episode events, streaming reports |
+| Expert | `multi_district_coordination` | 9 | 15 | 40 | Multi-district, mutual aid, comms degradation |
 
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
+All scenarios are deterministic given a seed, all graders are bounded `[0.0, 1.0]`, and the expert tier is genuinely hard for frontier models because it stacks comms degradation, mutual-aid timing windows, and streaming new incidents past step 14.
 
-### Prerequisites
+## How it's built
 
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
-
-```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
-
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
-
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
-```
-
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
-
-The deployed space includes:
-- **Demo UI** at `/demo` - Custom HTML interface for exploring the environment
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
-
-## Environment Details
-
-### Action
-**CrisisopsAction**: Contains a single field
-- `message` (str) - The message to echo back
-
-### Observation
-**CrisisopsObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
-
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Crisisops environment server running, you can connect directly:
-
-```python
-from crisisops import CrisisopsEnv
-
-# Connect to existing server
-crisisopsenv = CrisisopsEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = crisisopsenv.reset()
-result = crisisopsenv.step(CrisisopsAction(message="Hello!"))
-```
-
-Note: When connecting to an existing server, `crisisopsenv.close()` will NOT stop the server.
-
-### Using the Context Manager
-
-The client supports context manager usage for automatic connection management:
-
-```python
-from crisisops import CrisisopsAction, CrisisopsEnv
-
-# Connect with context manager (auto-connects and closes)
-with CrisisopsEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(CrisisopsAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
-```
-
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
-
-### Concurrent WebSocket Sessions
-
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
-
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    CrisisopsEnvironment,  # Pass class, not instance
-    CrisisopsAction,
-    CrisisopsObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
-)
-```
-
-Then multiple clients can connect simultaneously:
-
-```python
-from crisisops import CrisisopsAction, CrisisopsEnv
-from concurrent.futures import ThreadPoolExecutor
-
-def run_episode(client_id: int):
-    with CrisisopsEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(CrisisopsAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
-
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
-
-## Development & Testing
-
-### Direct Environment Testing
-
-Test the environment logic directly without starting the HTTP server:
-
-```bash
-# From the server directory
-python3 server/crisisops_environment.py
-```
-
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
-
-### Running Locally
-
-Run the server locally for development:
-
-```bash
-uvicorn server.app:app --reload
-```
-
-## Project Structure
+Standard OpenEnv layout:
 
 ```
 crisisops/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # CrisisopsEnv client
-├── models.py              # Action and Observation models
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── crisisops_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
+├── models.py                    # Pydantic action and observation models
+├── client.py                    # EnvClient for talking to the server
+├── openenv.yaml                 # Tasks and graders manifest
+├── inference.py                 # Baseline inference script (root level, hackathon required)
+├── server/
+│   ├── app.py                   # FastAPI app with session-backed HTTP
+│   ├── crisisops_environment.py # Core step/reset/state logic
+│   ├── reward.py                # Per-step reward signal (unbounded, for RL)
+│   ├── grader.py                # Episode-level graders (bounded [0.01, 0.99])
+│   ├── rules.py                 # Domain rules and optimal-plan computation
+│   ├── scenario_generator.py    # Deterministic scenario builder
+│   ├── scenarios/               # Tier configs, builders, mid-episode events
+│   ├── demo/                    # Static HTML/CSS/JS demo at /demo
+│   └── Dockerfile
+└── tests/                       # Pytest suite (all passing)
 ```
+
+The reward signal and the grader are intentionally separate. `reward.py` returns unbounded per-step values that GRPO can train on directly. `grader.py` returns bounded `[0.01, 0.99]` episode scores for evaluation and the hackathon validator. They share the same domain rules but neither layers on top of the other.
+
+There's also a hand-built tactical demo UI at `/demo` that plays back a scripted hard-tier episode so judges can see what the agent is reasoning over. It's purely cosmetic, the training and validation pipelines hit `/reset`, `/step`, and `/state` directly.
+
+## Running it
+
+```bash
+# Local
+git clone https://github.com/aroramrinaal/crisisops
+cd crisisops
+uv sync
+docker build -t crisisops -f server/Dockerfile .
+docker run -p 8000:8000 crisisops
+
+# Or hit the deployed Space directly
+export ENV_URL=https://mrinaalarora-crisisops.hf.space
+export MODEL_NAME=Qwen/Qwen2.5-Coder-3B-Instruct
+export HF_TOKEN=your_token
+python inference.py
+```
+
+## Training
+
+I trained `Qwen/Qwen2.5-Coder-3B-Instruct` with TRL's GRPOTrainer on a Modal H200, using Unsloth for 4-bit loading and LoRA r=16. The reward function in the training loop resets the env with a fixed seed, applies the model's generated action, and feeds the env's per-step reward back into GRPO with a small action-shaping bonus.
+
+Three runs total:
+- 1 on easy (`single_zone_response`)
+- 2 on medium (`multi_zone_triage`)
+
+The exact training script is at [`training-scripts/simple-training-script.py`](training-scripts/simple-training-script.py), and the Modal wrapper is at [`training-scripts/modal-training-script.py`](training-scripts/modal-training-script.py).
+
+## Results
+
+<!-- TRACKIO DASHBOARD SCREENSHOTS GO HERE -->
+<!-- 1 easy run + 2 medium runs from Trackio -->
+<!-- Caption each one: x-axis is GRPO step, y-axis is reward / loss -->
+
+*Reward and loss curves from the three GRPO runs (Trackio dashboard). The reward climbs steadily as the model learns to verify reports before allocating units and to publish coherent sitreps at the end of each episode.*
+
+## Links
+
+- **Hugging Face Space:** https://huggingface.co/spaces/mrinaalarora/crisisops
+- **GitHub repo:** https://github.com/aroramrinaal/crisisops
+- **Live demo UI:** https://mrinaalarora-crisisops.hf.space/demo
+- **Training notebook (Colab):** *to be added*
+- **Trackio dashboard:** https://huggingface.co/spaces/mrinaalarora/crisisops-grpo-trackio
+- **Blog / writeup:** *to be added*
+- **Earlier hackathon submissions:**
+  - [json_cleaning_env](https://huggingface.co/spaces/mrinaalarora/json-cleaning-env)
+  - [DryLabSim](https://huggingface.co/spaces/mrinaalarora/drylabsim)
+
+## Why this matters
+
+If you can train an LLM to act sensibly inside CrisisOps, you've trained it to do something that current models are demonstrably bad at: maintain state across a long noisy trajectory, weigh evidence before committing scarce resources, and recover when the situation changes mid-plan. That's a skill that transfers way beyond disaster response. It's the same shape of problem as triaging a security incident, running an experiment loop, or managing any partially observable real-world workflow.
+
+Built solo by [Mrinaal Arora](https://aroramrinaal.com) for the Meta PyTorch × Hugging Face × Scaler School of Technology OpenEnv Hackathon, April 2026.
