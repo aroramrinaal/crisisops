@@ -1,37 +1,38 @@
 """
 GRPO training run for CrisisOps + Unsloth on a single H200.
 
-Step-level training: each GRPO "step request" is one model action against the
-deployed CrisisOps HF Space. The model writes a JSON action, the env applies
-it, and the env's per-step reward becomes the GRPO reward. Across a training
-step we run `per_device_train_batch_size * gradient_accumulation_steps *
-num_generations` of these action requests, GRPO normalizes within each group
-and updates the LoRA adapter.
+One-step training: each GRPO sample is a fresh CrisisOps reset plus one model
+action. The model writes a JSON action, the env applies it, and the env's
+per-step reward becomes the GRPO reward. Across a training step we run
+`per_device_train_batch_size * gradient_accumulation_steps * num_generations`
+of these action requests, GRPO normalizes within each group and updates the
+LoRA adapter.
 
 Why step-level instead of episode-level:
 - Plays nicely with TRL's default GRPOTrainer contract (one prompt, one
   completion, one reward) instead of the experimental rollout_func path.
-- Many more reward observations per training hour, so the curve is smoother.
-- The per-step reward in `server/reward.py` already encodes trajectory-level
-  signals (deadline misses, resolved-before-deadline bonuses), so episode-
-  level credit assignment is not strictly needed for a hackathon-grade
-  improvement curve.
+- Prompt and reward stay aligned because each completion is scored against the
+  same deterministic reset seed that produced its prompt.
+- This is deliberately the smallest reliable RL artifact for the hackathon:
+  visible loss/reward curves first, fuller episode training later.
 
 The script:
 1. Loads Qwen2.5-Coder-3B-Instruct in 4-bit via unsloth + LoRA r=16
-2. Maintains a small pool of live CrisisOps episodes keyed by (seed, episode_id)
-3. Builds a HF Dataset of N step-request rows. Each row points at one episode
-   in the pool. When a reward function pulls the row, it renders a fresh prompt
-   from the env's current observation, calls /step with the model action, and
-   returns the env reward.
+2. Builds a HF Dataset of deterministic reset observations for fixed seeds
+3. The reward function resets the matching seed, applies the generated action,
+   and returns the env reward plus small validity/action-shaping bonuses
 4. Logs to trackio so the loss + reward curve are visible from a HF Space.
 
 Usage:
 
+export HF_TOKEN=hf_...
+export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
+
 hf jobs uv run \
+  --token "$HF_TOKEN" \
   --flavor h200 \
   --timeout 4h \
-  --secrets HF_TOKEN \
+  -s HF_TOKEN="$HF_TOKEN" \
   --with "git+https://github.com/huggingface/trl.git" \
   --with unsloth \
   --with transformers \
@@ -62,7 +63,6 @@ import threading
 import time
 import uuid
 import warnings
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -76,10 +76,9 @@ ENV_URL = os.getenv("ENV_URL", "https://mrinaalarora-crisisops.hf.space").rstrip
 MODEL_ID = os.getenv("MODEL_ID", "unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit").strip()
 TASK_ID = os.getenv("TASK_ID", "single_zone_response").strip()
 
-# Training scale. 100 GRPO steps with the sizing below = 100 weight updates,
+# Training scale. 100 GRPO steps with the sizing below = 100 weight updates and
 # 100 * 4 (grad_accum) * 2 (per-device batch) * 4 (num_generations) = 3200
-# action requests against the live HF Space. On an H200 with a 3B 4-bit model
-# this should land somewhere in the 30-45 minute range.
+# one-step reward calls against the live HF Space.
 GRPO_MAX_STEPS = int(os.getenv("GRPO_MAX_STEPS", "100"))
 GRPO_NUM_GENERATIONS = int(os.getenv("GRPO_NUM_GENERATIONS", "4"))
 GRPO_PER_DEVICE_BATCH = int(os.getenv("GRPO_PER_DEVICE_BATCH", "2"))
@@ -99,11 +98,12 @@ MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "4096"))
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "crisisops-grpo-easy-lora").strip()
 HF_REPO_ID = os.getenv("HF_REPO_ID", "").strip() or None
 TRACKIO_SPACE_ID = os.getenv("TRACKIO_SPACE_ID", "").strip() or None
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip() or None
+RUN_NAME = os.getenv("RUN_NAME", f"crisisops-{TASK_ID}-grpo-one-step").strip()
 
-# Episode pool. We rotate through this many fixed seeds to keep the reward
-# curve low-variance (recommended over fully random seeds for a short run).
-SEED_POOL_SIZE = int(os.getenv("SEED_POOL_SIZE", "5"))
-EPISODE_TRAINING_BUDGET = int(os.getenv("EPISODE_TRAINING_BUDGET", "16"))
+# Prompt seeds. We repeat a compact set of deterministic reset observations to
+# keep the run cheap and low-variance.
+SEED_POOL_SIZE = int(os.getenv("SEED_POOL_SIZE", "16"))
 
 # How many step-request rows to put in the dataset. GRPOTrainer iterates over
 # these; with num_train_epochs=1 and max_steps capped, we just need enough to
@@ -112,7 +112,7 @@ EPISODE_TRAINING_BUDGET = int(os.getenv("EPISODE_TRAINING_BUDGET", "16"))
 DATASET_ROWS = int(
     os.getenv(
         "DATASET_ROWS",
-        str(max(2048, GRPO_MAX_STEPS * GRPO_PER_DEVICE_BATCH * GRPO_GRAD_ACCUM * 4)),
+        str(max(256, GRPO_MAX_STEPS * GRPO_PER_DEVICE_BATCH * GRPO_GRAD_ACCUM * 2)),
     )
 )
 
@@ -201,145 +201,50 @@ ACTION_FORMAT_PROMPT = textwrap.dedent(
 
 
 # --------------------------------------------------------------------------- #
-# Episode pool — keeps live CrisisOps sessions across training steps
+# Training metrics — surfaced into Trackio and the final summary.
 # --------------------------------------------------------------------------- #
 
 
-@dataclass
-class EpisodeState:
-    """One live CrisisOps session that GRPO step requests pull from."""
+class TrainingMetrics:
+    """Small thread-safe metric bag used by the reward function."""
 
-    seed: int
-    session_id: str = ""
-    observation: Dict[str, Any] = field(default_factory=dict)
-    step_count: int = 0
-    episode_index: int = 0
-    done: bool = True  # start in 'done' so first request triggers a reset
-
-    def key(self) -> str:
-        return f"seed-{self.seed}"
-
-
-class EpisodePool:
-    """Thread-safe pool of CrisisOps episodes keyed by seed."""
-
-    def __init__(self, seeds: List[int], task_id: str):
-        self.task_id = task_id
+    def __init__(self) -> None:
         self.lock = threading.RLock()
-        self.episodes: Dict[int, EpisodeState] = {seed: EpisodeState(seed=seed) for seed in seeds}
-        # Round-robin pointer used when a reward function asks for a step
-        # without specifying which seed to use.
-        self._round_robin = 0
-        self._seeds = list(seeds)
-        # Counters surfaced into trackio
-        self.metrics = {
-            "episodes_completed": 0,
-            "episode_total_score": 0.0,
-            "episode_score_count": 0,
-            "step_total_reward": 0.0,
-            "step_total_count": 0,
-            "valid_action_count": 0,
-            "invalid_action_count": 0,
-            "action_type_counts": {},
-        }
-
-    def reset_episode(self, episode: EpisodeState) -> EpisodeState:
-        episode.episode_index += 1
-        episode.step_count = 0
-        episode.done = False
-        episode.session_id = ""
-        episode_id = f"train-{episode.seed}-{episode.episode_index}-{uuid.uuid4().hex[:8]}"
-        try:
-            response = post_json(
-                "/reset",
-                {"task_id": self.task_id, "seed": episode.seed, "episode_id": episode_id},
-            )
-        except Exception as exc:
-            print(f"[POOL] reset failed seed={episode.seed} error={exc}", flush=True)
-            episode.done = True
-            return episode
-        episode.session_id = str(response.get("session_id", episode_id))
-        episode.observation = response.get("observation") or {}
-        return episode
-
-    def ensure_live(self, episode: EpisodeState) -> EpisodeState:
-        if episode.done or not episode.session_id:
-            self.reset_episode(episode)
-        return episode
-
-    def next_episode(self) -> EpisodeState:
-        """Round-robin selection of an episode for the next step request."""
-        with self.lock:
-            seed = self._seeds[self._round_robin % len(self._seeds)]
-            self._round_robin += 1
-            episode = self.episodes[seed]
-            self.ensure_live(episode)
-            return episode
-
-    def apply_step_result(
-        self,
-        episode: EpisodeState,
-        action: Mapping[str, Any],
-        response: Mapping[str, Any],
-        reward: float,
-    ) -> Tuple[Optional[float], bool]:
-        """Update episode state from a /step response. Returns (terminal_score, done)."""
-        next_obs = response.get("observation") or {}
-        done = bool(response.get("done", False) or next_obs.get("done", False))
-        with self.lock:
-            episode.observation = next_obs
-            episode.step_count = int(next_obs.get("time_step", episode.step_count + 1))
-            episode.done = done
-            self.metrics["step_total_reward"] += float(reward)
-            self.metrics["step_total_count"] += 1
-            atype = str(action.get("type", "unknown"))
-            self.metrics["action_type_counts"][atype] = (
-                self.metrics["action_type_counts"].get(atype, 0) + 1
-            )
-            terminal_score = None
-            if done:
-                metadata = next_obs.get("metadata") or {}
-                if "terminal_score" in metadata:
-                    terminal_score = float(metadata["terminal_score"])
-                    self.metrics["episode_total_score"] += terminal_score
-                    self.metrics["episode_score_count"] += 1
-                self.metrics["episodes_completed"] += 1
-        return terminal_score, done
+        self.step_total_reward = 0.0
+        self.step_total_count = 0
+        self.valid_action_count = 0
+        self.invalid_action_count = 0
+        self.action_type_counts: Dict[str, int] = {}
 
     def record_invalid(self) -> None:
         with self.lock:
-            self.metrics["invalid_action_count"] += 1
+            self.invalid_action_count += 1
 
-    def record_valid(self) -> None:
+    def record_step(self, action: Mapping[str, Any], reward: float) -> None:
         with self.lock:
-            self.metrics["valid_action_count"] += 1
+            self.valid_action_count += 1
+            self.step_total_reward += float(reward)
+            self.step_total_count += 1
+            action_type = str(action.get("type", "unknown"))
+            self.action_type_counts[action_type] = (
+                self.action_type_counts.get(action_type, 0) + 1
+            )
 
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
-            avg_step_reward = (
-                self.metrics["step_total_reward"] / self.metrics["step_total_count"]
-                if self.metrics["step_total_count"]
-                else 0.0
-            )
-            avg_episode_score = (
-                self.metrics["episode_total_score"] / self.metrics["episode_score_count"]
-                if self.metrics["episode_score_count"]
-                else 0.0
-            )
-            total_actions = (
-                self.metrics["valid_action_count"] + self.metrics["invalid_action_count"]
-            )
-            valid_fraction = (
-                self.metrics["valid_action_count"] / total_actions
-                if total_actions
-                else 0.0
-            )
+            total_actions = self.valid_action_count + self.invalid_action_count
             return {
-                "episodes_completed": self.metrics["episodes_completed"],
-                "average_episode_score": avg_episode_score,
-                "average_step_reward": avg_step_reward,
-                "valid_action_fraction": valid_fraction,
-                "action_type_counts": dict(self.metrics["action_type_counts"]),
+                "average_step_reward": (
+                    self.step_total_reward / self.step_total_count
+                    if self.step_total_count
+                    else 0.0
+                ),
+                "valid_action_fraction": (
+                    self.valid_action_count / total_actions if total_actions else 0.0
+                ),
+                "valid_action_count": self.valid_action_count,
+                "invalid_action_count": self.invalid_action_count,
+                "action_type_counts": dict(self.action_type_counts),
             }
 
 
@@ -630,9 +535,8 @@ def build_prompt_messages(task_id: str, obs: Mapping[str, Any]) -> List[Dict[str
 # and return the env's reward.
 # --------------------------------------------------------------------------- #
 
-# Pool created in main() and bound here so the reward function can see it.
-_POOL: Optional[EpisodePool] = None
-_POOL_LOCK = threading.RLock()
+# Metrics created in main() and bound here so the reward function can update it.
+_METRICS: Optional[TrainingMetrics] = None
 
 
 def _completion_text(completion: Any) -> str:
@@ -650,54 +554,65 @@ def _completion_text(completion: Any) -> str:
 
 def crisisops_step_reward(prompts, completions, **kwargs) -> List[float]:
     """One reward per completion: env step reward (action accepted) or penalty."""
-    pool = _POOL
+    metrics = _METRICS
+    seeds = kwargs.get("seed") or [42] * len(completions)
     rewards: List[float] = []
-    for completion in completions:
+    for index, completion in enumerate(completions):
         text = _completion_text(completion)
         try:
             parsed = parse_action_json(text)
             action = sanitize_model_action(parsed)
         except Exception:
-            if pool is not None:
-                pool.record_invalid()
+            if metrics is not None:
+                metrics.record_invalid()
             rewards.append(-0.5)  # invalid JSON penalty
             continue
 
-        if pool is None:
-            rewards.append(0.0)
-            continue
-        pool.record_valid()
+        seed = int(seeds[index % len(seeds)])
+        episode_id = f"grpo-{seed}-{uuid.uuid4().hex[:8]}"
 
-        episode = pool.next_episode()
-        if not episode.session_id:
+        try:
+            reset_response = post_json(
+                "/reset",
+                {"task_id": TASK_ID, "seed": seed, "episode_id": episode_id},
+            )
+        except Exception as exc:
+            print(f"[REWARD] /reset error seed={seed} error={exc}", flush=True)
+            rewards.append(-0.2)
+            continue
+        session_id = str(reset_response.get("session_id", ""))
+        if not session_id:
             rewards.append(-0.5)
             continue
 
         try:
             response = post_json(
-                "/step",
-                {"session_id": episode.session_id, "action": action},
+                "/step", {"session_id": session_id, "action": action}
             )
         except Exception as exc:
-            print(f"[REWARD] /step error session={episode.session_id} error={exc}", flush=True)
-            with pool.lock:
-                episode.done = True
+            print(f"[REWARD] /step error session={session_id} error={exc}", flush=True)
             rewards.append(-0.2)
             continue
 
         step_reward = float(response.get("reward") or 0.0)
-        terminal_score, done = pool.apply_step_result(episode, action, response, step_reward)
-
-        # Combined reward: step reward always, + terminal_score bonus when the
-        # episode actually finishes via publish_sitrep (or hits cap with one).
-        # The terminal score is in [0.01, 0.99] from EasyGrader, so this gives
-        # a strong end-of-episode signal that the per-step reward alone lacks.
-        reward = step_reward
-        if done and terminal_score is not None:
-            reward += terminal_score
+        reward = step_reward + action_shaping_bonus(action)
+        if metrics is not None:
+            metrics.record_step(action, reward)
 
         rewards.append(reward)
     return rewards
+
+
+def action_shaping_bonus(action: Mapping[str, Any]) -> float:
+    """Small bias toward actions that can make progress on the easy task."""
+    action_type = str(action.get("type", ""))
+    if action_type == "verify_report":
+        return 0.05
+    if action_type in {"flag_false_alarm", "allocate_unit"}:
+        return 0.02
+    if action_type in {"request_recon", "noop"}:
+        return -0.03
+    return 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -711,14 +626,13 @@ def make_pool_metric_callback():
 
     class PoolMetricCallback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
-            pool = _POOL
-            if pool is None or logs is None:
+            metrics = _METRICS
+            if metrics is None or logs is None:
                 return
-            snapshot = pool.snapshot()
-            logs["crisisops/avg_episode_score"] = snapshot["average_episode_score"]
+            snapshot = metrics.snapshot()
             logs["crisisops/avg_step_reward"] = snapshot["average_step_reward"]
-            logs["crisisops/episodes_completed"] = snapshot["episodes_completed"]
             logs["crisisops/valid_action_fraction"] = snapshot["valid_action_fraction"]
+            logs["crisisops/valid_action_count"] = snapshot["valid_action_count"]
 
     return PoolMetricCallback
 
@@ -768,7 +682,7 @@ def wait_for_cuda(torch, retries: int = 6, sleep_seconds: int = 5) -> None:
 
 
 def main() -> None:
-    global _POOL
+    global _METRICS
 
     if TASK_ID not in TASK_CONFIGS:
         raise ValueError(f"Unknown TASK_ID={TASK_ID!r}")
@@ -831,28 +745,31 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
     print("[TRAIN] model loaded and LoRA adapter attached", flush=True)
 
-    # ---- Build episode pool with rotating fixed seeds --------------------
+    # ---- Build prompt pool from deterministic resets ---------------------
     seeds = [42 + offset for offset in range(SEED_POOL_SIZE)]
-    _POOL = EpisodePool(seeds=seeds, task_id=TASK_ID)
-    # Pre-warm one episode per seed so the first GRPO step doesn't hit a
-    # cold start for every seed at once.
+    _METRICS = TrainingMetrics()
+    prompt_observations: Dict[int, Dict[str, Any]] = {}
     for seed in seeds:
-        _POOL.ensure_live(_POOL.episodes[seed])
-    print(f"[TRAIN] episode pool warmed seeds={seeds}", flush=True)
+        response = post_json(
+            "/reset",
+            {
+                "task_id": TASK_ID,
+                "seed": seed,
+                "episode_id": f"prompt-{seed}-{uuid.uuid4().hex[:8]}",
+            },
+        )
+        prompt_observations[seed] = response.get("observation") or {}
+    print(f"[TRAIN] prompt pool warmed seeds={seeds}", flush=True)
 
     # ---- Build dataset -----------------------------------------------------
-    # Each row carries the seed it should pull from and a per-row prompt
-    # rendered from that episode's CURRENT observation. The rendered prompt
-    # ages quickly as the episode advances, but GRPOTrainer regenerates the
-    # tokenized prompt on access so this is fine for warmup. The reward
-    # function does the real env interaction at completion time.
+    # Each row carries the seed that produced its prompt. The reward function
+    # resets that same seed before applying the completion, so prompt and
+    # scored environment state stay aligned.
     from datasets import Dataset
 
     def make_row(index: int) -> Dict[str, Any]:
         seed = seeds[index % len(seeds)]
-        episode = _POOL.episodes[seed]
-        _POOL.ensure_live(episode)
-        messages = build_prompt_messages(TASK_ID, episode.observation)
+        messages = build_prompt_messages(TASK_ID, prompt_observations[seed])
         # GRPOTrainer accepts prompts as either string or list-of-messages;
         # list-of-messages avoids manual chat template formatting.
         return {
@@ -867,6 +784,10 @@ def main() -> None:
 
     # ---- GRPO config -------------------------------------------------------
     from trl import GRPOConfig, GRPOTrainer
+
+    if TRACKIO_SPACE_ID:
+        os.environ["TRACKIO_SPACE_ID"] = TRACKIO_SPACE_ID
+        os.environ.setdefault("TRACKIO_PROJECT", "crisisops-grpo")
 
     grpo_kwargs: Dict[str, Any] = dict(
         output_dir=OUTPUT_DIR,
@@ -888,13 +809,13 @@ def main() -> None:
         save_steps=GRPO_SAVE_STEPS,
         save_total_limit=3,
         push_to_hub=bool(HF_REPO_ID),
+        hub_token=HF_TOKEN,
         hub_model_id=HF_REPO_ID,
         hub_strategy="every_save" if HF_REPO_ID else "end",
         report_to="trackio" if TRACKIO_SPACE_ID else "none",
+        run_name=RUN_NAME,
         bf16=True,
     )
-    if TRACKIO_SPACE_ID:
-        grpo_kwargs["trackio_space_id"] = TRACKIO_SPACE_ID
     grpo_config = GRPOConfig(**grpo_kwargs)
 
     PoolMetricCallback = make_pool_metric_callback()
@@ -937,7 +858,7 @@ def main() -> None:
             print(f"[TRAIN] push_to_hub failed error={exc}", flush=True)
 
     # ---- Final pool snapshot ---------------------------------------------
-    final = _POOL.snapshot()
+    final = _METRICS.snapshot()
     summary_path = os.path.join(save_dir, "crisisops_training_summary.json")
     try:
         os.makedirs(save_dir, exist_ok=True)
@@ -960,9 +881,7 @@ def main() -> None:
         print(f"[TRAIN] summary write failed error={exc}", flush=True)
 
     print(
-        f"[TRAIN] DONE episodes_completed={final['episodes_completed']} "
-        f"avg_episode_score={final['average_episode_score']:.3f} "
-        f"avg_step_reward={final['average_step_reward']:.3f} "
+        f"[TRAIN] DONE avg_step_reward={final['average_step_reward']:.3f} "
         f"valid_action_fraction={final['valid_action_fraction']:.3f}",
         flush=True,
     )
