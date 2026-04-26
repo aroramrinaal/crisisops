@@ -14,7 +14,7 @@ hf jobs uv run \
   --flavor "${HF_JOB_FLAVOR:-h200}" \
   --timeout "${HF_JOB_TIMEOUT:-4h}" \
   -s HF_TOKEN="$HF_TOKEN" \
-  --with "git+https://github.com/huggingface/trl.git" \
+  --with "trl==0.19.1" \
   --with unsloth \
   --with transformers \
   --with accelerate \

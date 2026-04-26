@@ -33,7 +33,7 @@ hf jobs uv run \
   --flavor h200 \
   --timeout 4h \
   -s HF_TOKEN="$HF_TOKEN" \
-  --with "git+https://github.com/huggingface/trl.git" \
+  --with "trl==0.19.1" \
   --with unsloth \
   --with transformers \
   --with accelerate \
@@ -828,6 +828,11 @@ def main() -> None:
         train_dataset=train_dataset,
         callbacks=[PoolMetricCallback()],
     )
+    # Unsloth's patched GRPO trainer currently reads these vision fields even
+    # for text-only models on some dependency combinations.
+    for attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
+        if not hasattr(trainer, attr):
+            setattr(trainer, attr, None)
 
     # ---- Train -------------------------------------------------------------
     start_mem = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
