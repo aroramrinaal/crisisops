@@ -115,7 +115,7 @@ The exact training script is at [`training-scripts/simple-training-script.py`](t
 
 ## Results
 
-<img width="1710" alt="Trackio GRPO dashboard — medium task run showing reward climbing, loss falling, KL divergence, grad norm, learning rate decay, completion length, and mean KL across ~200 steps" src="assets/trackio_dashboard.png" />
+[<img width="1710" alt="Trackio GRPO dashboard — medium task run showing reward climbing, loss falling, KL divergence, grad norm, learning rate decay, completion length, and mean KL across ~200 steps" src="assets/trackio_dashboard.png" />](https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden)
 
 *Reward and loss curves from the three GRPO runs (Trackio dashboard). The reward climbs steadily as the model learns to verify reports before allocating units and to publish coherent sitreps at the end of each episode.*
 
@@ -125,7 +125,7 @@ The exact training script is at [`training-scripts/simple-training-script.py`](t
 - **GitHub repo:** https://github.com/aroramrinaal/crisisops
 - **Live demo UI:** https://mrinaalarora-crisisops.hf.space/demo
 - **Training notebook (Colab):** *to be added*
-- **Trackio dashboard:** https://huggingface.co/spaces/mrinaalarora/crisisops-grpo-trackio
+- **Trackio dashboard:** https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden
 - **Blog / writeup:** *to be added*
 - **Earlier hackathon submissions:**
   - [json_cleaning_env](https://huggingface.co/spaces/mrinaalarora/json-cleaning-env)
