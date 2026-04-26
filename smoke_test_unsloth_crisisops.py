@@ -33,6 +33,7 @@ import os
 import platform
 import re
 import textwrap
+import warnings
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -51,6 +52,19 @@ MAX_EPISODE_TURNS = int(os.getenv("MAX_EPISODE_TURNS", "8"))
 OUTPUT_PATH = os.getenv("SMOKE_OUTPUT_PATH", "smoke_test_summary.json").strip()
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.0"))
 TOP_P = float(os.getenv("TOP_P", "0.95"))
+SHOW_MODEL_TEXT = os.getenv("SHOW_MODEL_TEXT", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*AttentionMaskConverter.*deprecated.*",
+    category=FutureWarning,
+)
 
 TASK_TIERS: Dict[str, str] = {
     "single_zone_response": "easy",
@@ -281,6 +295,7 @@ def env_step(session_id: str, action: Mapping[str, Any]) -> dict:
 def log_step(
     step: int,
     action: str,
+    action_detail: str,
     reward: float,
     done: bool,
     error: Optional[str],
@@ -288,7 +303,8 @@ def log_step(
 ) -> None:
     error_val = error if error else "null"
     print(
-        f"[STEP] step={step} action={action} source={source} reward={reward:.2f} "
+        f"[STEP] step={step} action={action} detail={action_detail} "
+        f"source={source} reward={reward:.2f} "
         f"done={str(done).lower()} error={error_val}",
         flush=True,
     )
@@ -822,6 +838,8 @@ def load_unsloth_model() -> Tuple[Any, Any]:
         use_rslora=False,
     )
     FastLanguageModel.for_inference(model)
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.max_length = None
     print("[SMOKE] model loaded and LoRA adapter attached", flush=True)
     return model, tokenizer
 
@@ -858,10 +876,37 @@ def _history_lines(history: List[Dict[str, Any]]) -> str:
     lines = []
     for item in history[-5:]:
         lines.append(
-            f"  step={item['step']} action={item['action']} "
+            f"  step={item['step']} action={item['action']} detail={item['detail']} "
             f"source={item['source']} reward={item['reward']:+.2f}"
         )
     return "\n".join(lines)
+
+
+def _action_detail(action: Mapping[str, Any]) -> str:
+    action_type = str(action.get("type", "unknown"))
+    if action_type == "verify_report":
+        return f"report_id={action.get('report_id')}"
+    if action_type == "flag_false_alarm":
+        return f"report_id={action.get('report_id')}"
+    if action_type == "allocate_unit":
+        return (
+            f"unit_id={action.get('unit_id')} zone_id={action.get('zone_id')} "
+            f"task={action.get('task')}"
+        )
+    if action_type == "request_recon":
+        return f"zone_id={action.get('zone_id')}"
+    if action_type == "issue_evacuation":
+        return f"zone_id={action.get('zone_id')}"
+    if action_type == "dispatch_supplies":
+        return f"destination_zone_id={action.get('destination_zone_id')}"
+    if action_type == "publish_sitrep":
+        payload = action.get("payload", {})
+        if isinstance(payload, Mapping):
+            return (
+                f"confirmed={len(payload.get('incidents_confirmed', []))} "
+                f"resolved={len(payload.get('incidents_resolved', []))}"
+            )
+    return "-"
 
 
 def choose_model_action(
@@ -909,6 +954,9 @@ def choose_model_action(
         generated[0][prompt_tokens:],
         skip_special_tokens=True,
     ).strip()
+    if SHOW_MODEL_TEXT:
+        preview = response_text[:300].replace("\n", " ")
+        print(f"[MODEL] raw={preview}", flush=True)
 
     try:
         parsed = parse_action_json(response_text)
@@ -985,6 +1033,7 @@ def run_episode(
             {
                 "step": step,
                 "action": str(action.get("type", "unknown")),
+                "detail": _action_detail(action),
                 "source": source,
                 "reward": reward,
                 "done": done,
@@ -993,6 +1042,7 @@ def run_episode(
         log_step(
             step=step,
             action=str(action.get("type", "unknown")),
+            action_detail=_action_detail(action),
             reward=reward,
             done=done,
             error=error,
