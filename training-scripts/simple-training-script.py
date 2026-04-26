@@ -58,6 +58,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -644,14 +645,6 @@ def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
         if not hasattr(trainer, attr):
             setattr(trainer, attr, None)
 
-    method = getattr(trainer, "_generate_and_score_completions", None)
-    func = getattr(method, "__func__", method)
-    globals_dict = getattr(func, "__globals__", None)
-    if not isinstance(globals_dict, dict):
-        return
-    if "truncate_with_protected_tokens" in globals_dict:
-        return
-
     def truncate_with_protected_tokens(input_ids, attention_mask, max_length, protected):
         del protected
         if max_length is None:
@@ -660,7 +653,31 @@ def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
             return input_ids, attention_mask
         return input_ids[..., -max_length:], attention_mask[..., -max_length:]
 
-    globals_dict["truncate_with_protected_tokens"] = truncate_with_protected_tokens
+    patched_scopes = 0
+
+    for module_name, module in list(sys.modules.items()):
+        if module_name.endswith("UnslothGRPOTrainer"):
+            module.__dict__.setdefault(
+                "truncate_with_protected_tokens", truncate_with_protected_tokens
+            )
+            patched_scopes += 1
+
+    method = getattr(trainer, "_generate_and_score_completions", None)
+    candidates = [method, getattr(method, "__func__", None)]
+    for candidate in candidates:
+        while candidate is not None:
+            globals_dict = getattr(candidate, "__globals__", None)
+            if isinstance(globals_dict, dict):
+                globals_dict["truncate_with_protected_tokens"] = (
+                    truncate_with_protected_tokens
+                )
+                patched_scopes += 1
+            candidate = getattr(candidate, "__wrapped__", None)
+
+    print(
+        f"[TRAIN] patched_text_only_unsloth_grpo_trainer scopes={patched_scopes}",
+        flush=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
