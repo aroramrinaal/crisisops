@@ -641,7 +641,12 @@ def make_pool_metric_callback():
 
 def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
     """Patch text-only compatibility gaps in Unsloth's generated GRPO trainer."""
-    for attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
+    for attr in (
+        "image_token",
+        "image_token_id",
+        "vision_start_token_id",
+        "vision_end_token_id",
+    ):
         if not hasattr(trainer, attr):
             setattr(trainer, attr, None)
     processing_class = getattr(trainer, "processing_class", None)
