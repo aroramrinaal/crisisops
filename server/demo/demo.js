@@ -134,6 +134,7 @@ function init() {
   els.terrain      = document.getElementById("terrain");
 
   buildUnits();
+  buildBuildings();
   buildZones();
   buildUnitDots();
   drawRoutes();
@@ -177,11 +178,49 @@ function buildZones() {
     el.innerHTML = `
       <div class="zone-label">${z.name}</div>
       <div class="zone-box"></div>
-      <div class="zone-glyph">${z.glyph}</div>
       <div class="zone-sev" id="sev-${id}">SEV —</div>
       <div class="zone-tag">${z.tag}</div>
     `;
     els.mapPanel.appendChild(el);
+  });
+}
+
+// seeded PRNG so building layout is stable across reloads
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+// drop small rects inside urban polygon AABBs to suggest dense city blocks
+function buildBuildings() {
+  const g = document.getElementById("buildings");
+  const rng = makeRng(42);
+  // [x1, y1, x2, y2, density, w, h, warm?]
+  const clusters = [
+    { box: [27, 38, 51, 62], n: 26, w: 1.4, h: 2.2, warm: false }, // Old Market
+    { box: [43, 9,  70, 32], n: 14, w: 1.8, h: 2.6, warm: true  }, // N. Hospital
+    { box: [60, 45, 84, 65], n: 16, w: 2.6, h: 1.8, warm: false }, // Rail Yard (warehouses)
+    { box: [7,  69, 25, 90], n: 18, w: 1.2, h: 1.8, warm: false }, // Riverside
+  ];
+  const svgNS = "http://www.w3.org/2000/svg";
+  clusters.forEach(c => {
+    const [x1, y1, x2, y2] = c.box;
+    for (let i = 0; i < c.n; i++) {
+      const w = c.w * (0.7 + rng() * 0.7);
+      const h = c.h * (0.7 + rng() * 0.7);
+      const x = x1 + rng() * (x2 - x1 - w);
+      const y = y1 + rng() * (y2 - y1 - h);
+      const r = document.createElementNS(svgNS, "rect");
+      r.setAttribute("x", x.toFixed(2));
+      r.setAttribute("y", y.toFixed(2));
+      r.setAttribute("width",  w.toFixed(2));
+      r.setAttribute("height", h.toFixed(2));
+      r.setAttribute("class", c.warm ? "t-bldg-warm" : "t-bldg");
+      g.appendChild(r);
+    }
   });
 }
 

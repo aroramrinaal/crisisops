@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>CrisisOps · Cascading Crisis · AI Commander</title>
+  <title>CrisisOps · Cascading Crisis</title>
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="panels.css" />
   <link rel="stylesheet" href="map.css" />
@@ -31,15 +31,15 @@
     <!-- ============================ LEFT PANEL ============================ -->
     <aside class="left panel">
       <div class="panel-header">
-        <span>Reports · Intel Feed</span>
+        <span>Intel Feed</span>
         <span class="count">SEEN <span id="reports-count">0 / 10</span></span>
       </div>
       <div class="panel-body">
-        <div id="reports-list" class="reports-list"><!-- cards stream in --></div>
+        <div id="reports-list" class="reports-list"></div>
         <div class="units-block">
           <div class="panel-header" style="padding:0;border:none;">
-            <span>Units · Available</span>
-            <span class="count">6 total</span>
+            <span>Units</span>
+            <span class="count">6 available</span>
           </div>
           <div id="units-grid" class="units-grid"></div>
         </div>
@@ -51,76 +51,86 @@
 
       <!-- corner overlays -->
       <div class="map-overlay tl">
-        <div><span class="k">DISTRICT</span> <span class="v">KIRAN VALLEY</span></div>
-        <div><span class="k">GRID</span> <span class="v">38T MR 4421 9087</span></div>
+        <div><span class="k">DISTRICT</span> &nbsp;<span class="v">KIRAN VALLEY</span></div>
+        <div><span class="k">GRID</span> &nbsp;<span class="v">38T MR 4421 9087</span></div>
       </div>
       <div class="map-overlay tr">
-        <div><span class="k">SCENARIO</span> <span class="v">CASCADING_CRISIS</span></div>
-        <div><span class="k">SEED</span> <span class="v">42</span></div>
+        <div><span class="k">SCENARIO</span> &nbsp;<span class="v">CASCADING_CRISIS</span></div>
+        <div><span class="k">SEED</span> &nbsp;<span class="v">42</span></div>
       </div>
       <div class="map-overlay bl">
-        <div><span class="k">SCALE</span> <span class="v">1 : 25 000</span></div>
-        <div><span class="k">N ↑</span></div>
+        <div><span class="k">SCALE</span> &nbsp;<span class="v">1 : 25 000</span></div>
+        <div><span class="k">N</span> &nbsp;<span class="v">↑</span></div>
       </div>
       <div class="map-overlay br">
-        <div><span class="k">CLOCK</span> <span class="v">T+00:14:32</span></div>
-        <div><span class="k">RULESET</span> <span class="v">v1.4</span></div>
+        <div><span class="k">CLOCK</span> &nbsp;<span class="v">T+00:14:32</span></div>
       </div>
 
-      <!-- terrain svg (background) -->
+      <!-- terrain svg (hand-drawn aerial, no SVG text — labels are HTML) -->
       <svg id="terrain" class="terrain" viewBox="0 0 100 100" preserveAspectRatio="none">
-        <!-- river / water bodies -->
-        <path class="t-water" d="M -2 42 C 6 56, 12 70, 14 86 L 6 102 L -2 102 Z" />
-        <path class="t-water" d="M 0 92 C 12 94, 22 97, 32 102 L -2 102 Z" />
 
-        <!-- urban patches -->
-        <rect class="t-urban"   x="28" y="42" width="20" height="20" />
-        <rect class="t-urban-2" x="30" y="62" width="14" height="10" />
-        <rect class="t-urban"   x="46" y="12" width="20" height="18" />
-        <rect class="t-urban-2" x="48" y="30" width="10" height="6" />
-        <rect class="t-urban-2" x="62" y="48" width="20" height="18" />
-        <rect class="t-urban"   x="64" y="66" width="12" height="6" />
+        <!-- WATER · river entering W and exiting S -->
+        <path class="t-water" d="M -2 26 C 6 42, 11 56, 13 72 C 15 86, 21 100, 28 102 L -2 102 Z" />
 
-        <!-- hill / elevated terrain -->
-        <polygon class="t-hill" points="74,10 100,6 102,32 88,40 76,32" />
-        <polygon class="t-hill" points="78,38 96,36 100,46 84,48" />
+        <!-- VEGETATION patches (large dark green areas) -->
+        <polygon class="t-veg"   points="40,68 62,64 74,72 72,88 50,92 36,82 34,74" />
+        <polygon class="t-veg-2" points="0,2 18,0 24,10 20,22 4,20" />
+        <polygon class="t-veg"   points="62,86 88,86 92,98 66,100" />
+        <polygon class="t-veg-2" points="50,38 58,36 60,46 52,46" />
 
-        <!-- parks / open ground -->
-        <ellipse class="t-park" cx="52" cy="78" rx="22" ry="9" />
-        <ellipse class="t-park" cx="22" cy="32" rx="14" ry="6" />
+        <!-- URBAN BASE PATCHES (subtle tan tint under building clusters) -->
+        <polygon class="t-urban"   points="26,38 50,38 52,62 28,64 24,52" />   <!-- Old Market -->
+        <polygon class="t-urban"   points="42,8  68,6  72,30 46,34" />          <!-- N. Hospital -->
+        <polygon class="t-urban-2" points="58,44 84,42 86,66 62,68" />          <!-- Rail Yard -->
+        <polygon class="t-urban"   points="6,68  26,70 26,90 4,92" />           <!-- Riverside -->
 
-        <!-- contour lines on hill -->
-        <path class="t-contour" d="M 78 14 Q 86 10, 96 14" />
-        <path class="t-contour" d="M 78 20 Q 86 16, 96 20" />
-        <path class="t-contour" d="M 78 26 Q 86 22, 96 26" />
-        <path class="t-contour" d="M 78 32 Q 86 28, 94 32" />
+        <!-- HILL · subtle elevation polygon + contour rings -->
+        <polygon class="t-hill" points="70,0 100,0 100,40 80,42 70,30 68,16" />
+        <path class="t-contour" d="M 72 6  Q 86 2  100 6"  />
+        <path class="t-contour" d="M 73 12 Q 86 8  100 12" />
+        <path class="t-contour" d="M 75 18 Q 86 14 100 18" />
+        <path class="t-contour" d="M 77 24 Q 87 20 99 24" />
+        <path class="t-contour" d="M 79 30 Q 88 26 96 30" />
+        <path class="t-contour" d="M 81 36 Q 88 32 94 36" />
 
-        <!-- river bank line -->
-        <path class="t-water-line" d="M -2 42 C 6 56, 12 70, 14 86 L 8 100" />
+        <!-- WATER edge (river bank highlight) -->
+        <path class="t-water-line" d="M -2 26 C 6 42, 11 56, 13 72 C 15 86, 21 100, 28 102" />
 
-        <!-- main road network -->
-        <path class="t-road" d="M -2 78 L 18 78 L 30 70 L 38 56 L 46 40 L 52 26 L 64 22 L 84 26" />
-        <path class="t-road" d="M 36 52 L 54 50 L 70 54 L 84 50" />
-        <path class="t-road-thin" d="M 18 78 L 30 80 L 50 82 L 70 82 L 86 80" />
-        <path class="t-road-thin" d="M 52 22 L 70 30 L 84 26" />
-        <path class="t-road-thin" d="M 36 52 L 42 36 L 52 22" />
-        <path class="t-road-thin" d="M 70 56 L 78 64 L 84 70" />
+        <!-- ROAD NETWORK · main arterials (thick light grey) -->
+        <path class="t-road" d="M -2 80 L 14 80 L 22 76 L 36 64 L 48 54 L 62 48 L 76 44 L 90 38 L 100 34" />
+        <path class="t-road" d="M 36 4 L 38 18 L 40 34 L 42 50 L 46 70 L 52 88 L 58 100" />
+        <path class="t-road" d="M 28 52 L 50 52 L 68 54 L 86 52 L 100 50" />
 
-        <!-- rail line through rail-yard -->
-        <path class="t-rail" d="M 56 62 L 92 60" />
-        <path class="t-rail" d="M 60 50 L 78 48 L 88 42" />
+        <!-- ROAD · secondary -->
+        <path class="t-road-thin" d="M 14 80 L 16 90 L 22 100" />
+        <path class="t-road-thin" d="M 56 6 L 60 22 L 64 36 L 70 50" />
+        <path class="t-road-thin" d="M 70 50 L 76 60 L 80 74 L 84 90" />
+        <path class="t-road-thin" d="M 60 22 L 76 22 L 90 26 L 100 28" />
+        <path class="t-road-thin" d="M 42 50 L 36 36 L 32 22" />
+        <path class="t-road-thin" d="M 20 78 L 30 84 L 44 88 L 60 90" />
 
-        <!-- terrain labels -->
-        <text class="t-label" x="2"  y="36">RIVER · MARA</text>
-        <text class="t-label" x="40" y="78">PARK Q</text>
-        <text class="t-label" x="78" y="8" >HILLS · 240m</text>
-        <text class="t-label" x="56" y="62">YARD</text>
+        <!-- RAIL · through rail yard -->
+        <path class="t-rail" d="M 54 60 L 70 56 L 88 50 L 100 46" />
+        <path class="t-rail" d="M 70 56 L 76 64 L 82 76" />
+
+        <!-- COMPOUND outlines (palantir signature yellow polygons) -->
+        <polygon class="t-compound" points="58,44 84,42 86,66 62,68" />        <!-- rail yard fence -->
+        <polygon class="t-compound" points="42,8 68,6 72,30 46,34" />          <!-- hospital perimeter -->
+        <polygon class="t-compound" points="70,0 100,0 100,40 80,42 70,30" />  <!-- hill restricted -->
+
+        <!-- BUILDING CLUSTERS · injected by demo.js into this group -->
+        <g id="buildings"></g>
       </svg>
 
-      <!-- routes overlay (drawn dynamically by demo.js) -->
+      <!-- routes overlay (drawn by demo.js) -->
       <svg class="routes-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
         <g id="routes"></g>
       </svg>
+
+      <!-- terrain HTML labels (pixel-correct, won't stretch) -->
+      <div class="terrain-label" style="left: 6%;  top: 50%;">RIVER · MARA</div>
+      <div class="terrain-label" style="left: 56%; top: 80%;">PARK Q</div>
+      <div class="terrain-label" style="left: 88%; top: 8%;">HILLS · 240m</div>
 
       <!-- zones + unit dots get appended here by demo.js -->
 
@@ -129,7 +139,7 @@
     <!-- ============================ RIGHT PANEL ============================ -->
     <aside class="right panel">
       <div class="panel-header">
-        <span>Action Log · AI Commander</span>
+        <span>Action Log</span>
         <span class="count">deterministic</span>
       </div>
 
@@ -161,14 +171,11 @@
     <footer class="bottom">
       <div class="meta">
         <span>CrisisOps</span>
-        <span>OpenEnv RL Environment</span>
-        <span>Hard · cascading_crisis</span>
+        <span>cascading_crisis · hard</span>
         <span>5 zones · 10 reports · 6 units</span>
       </div>
       <div class="meta">
-        <span>build · demo</span>
         <span>seed 42</span>
-        <span>v1.4</span>
       </div>
     </footer>
 
