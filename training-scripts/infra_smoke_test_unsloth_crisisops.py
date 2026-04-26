@@ -122,12 +122,8 @@ SYSTEM_PROMPT = textwrap.dedent(
     You are an emergency operations commander for CrisisOps. Return exactly one
     JSON object for the next environment action.
 
-    DEFAULT BEHAVIOR: copy the `Recommended action` block VERBATIM. The
-    deterministic policy that produced it already accounts for verification
-    status, unit-type matching, blocked zones, deadlines, and sitrep timing.
-    Deviate ONLY if the observation reveals something the recommendation
-    clearly missed. Use only IDs that appear in the visible observation.
-    Return JSON only. No markdown fences. No prose outside the JSON.
+    Use only IDs that appear in the visible observation. Return JSON only. No
+    markdown fences. No prose outside the JSON.
     """
 ).strip()
 
@@ -886,7 +882,6 @@ def _wait_for_cuda(torch: Any, retries: int = 6, sleep_seconds: int = 5) -> None
 def render_prompt(
     task_id: str,
     obs: Mapping[str, Any],
-    fallback_action: Mapping[str, Any],
     history: List[Dict[str, Any]],
 ) -> str:
     brief = TASK_BRIEFS.get(task_id, "(no brief)")
@@ -903,8 +898,6 @@ def render_prompt(
         f"Recent steps (most recent last):\n{recent_steps}\n\n"
         f"Current observation:\n"
         f"{json.dumps(_compact_observation(obs), sort_keys=True)}\n\n"
-        f"Recommended action:\n"
-        f"{json.dumps(dict(fallback_action), sort_keys=True)}\n\n"
         "Return exactly one JSON object and nothing else."
     )
 
@@ -958,7 +951,7 @@ def choose_model_action(
 ) -> Tuple[dict, str, str | None]:
     import torch
 
-    prompt = render_prompt(task_id, obs, fallback_action, history)
+    prompt = render_prompt(task_id, obs, history)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
