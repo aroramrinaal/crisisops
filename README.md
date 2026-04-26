@@ -30,7 +30,7 @@ tags:
 
 <img width="1710" height="897" alt="Screenshot 2026-04-26 at 4 07 40 PM" src="https://github.com/user-attachments/assets/becba5eb-b786-4b01-95c6-3397ddc45148" />
 
-<iframe width="560" height="315" src="https://www.youtube.com/embed/9OPGw5CEAiM?si=f3lmNzT1BjAI105E&amp;controls=0" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+[![CrisisOps 2-minute demo](https://img.youtube.com/vi/9OPGw5CEAiM/maxresdefault.jpg)](https://youtu.be/9OPGw5CEAiM)
 
 ## The problem
 
