@@ -32,7 +32,9 @@ import json
 import os
 import platform
 import re
+import subprocess
 import textwrap
+import time
 import warnings
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -793,10 +795,10 @@ def _error_from_observation(obs: Mapping[str, Any]) -> Optional[str]:
 
 def load_unsloth_model() -> Tuple[Any, Any]:
     import torch
-    from unsloth import FastLanguageModel
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available; this smoke test requires a GPU job.")
+    _log_gpu_preflight()
+    _wait_for_cuda(torch)
+    from unsloth import FastLanguageModel
 
     print(
         f"[SMOKE] python={platform.python_version()} platform={platform.platform()}",
@@ -842,6 +844,43 @@ def load_unsloth_model() -> Tuple[Any, Any]:
         model.generation_config.max_length = None
     print("[SMOKE] model loaded and LoRA adapter attached", flush=True)
     return model, tokenizer
+
+
+def _log_gpu_preflight() -> None:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "-L"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        if output:
+            print(f"[SMOKE] nvidia_smi={output}", flush=True)
+    except Exception as exc:
+        print(f"[SMOKE] nvidia_smi_unavailable={exc}", flush=True)
+
+
+def _wait_for_cuda(torch: Any, retries: int = 6, sleep_seconds: int = 5) -> None:
+    last_error: Optional[str] = None
+    for attempt in range(1, retries + 1):
+        try:
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                if not torch.cuda.is_initialized():
+                    torch.cuda.init()
+                return
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        print(
+            f"[SMOKE] cuda_not_ready attempt={attempt}/{retries} "
+            f"sleep_seconds={sleep_seconds} last_error={last_error or 'none'}",
+            flush=True,
+        )
+        time.sleep(sleep_seconds)
+    raise RuntimeError(
+        "CUDA did not become ready inside the HF Job. "
+        f"Last error: {last_error or 'torch.cuda.is_available() returned false'}"
+    )
 
 
 def render_prompt(
