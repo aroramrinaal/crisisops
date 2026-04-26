@@ -22,6 +22,7 @@ tags:
 - **Live demo UI:** https://mrinaalarora-crisisops.hf.space/demo
 - **Training scripts:** https://github.com/aroramrinaal/crisisops/tree/main/training-scripts
 - **Trackio dashboard:** https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden
+- **YouTube video:** https://youtu.be/9OPGw5CEAiM
 - **Blog / writeup:** *to be added*
 - **Earlier hackathon submissions:**
   - [json_cleaning_env](https://huggingface.co/spaces/mrinaalarora/json-cleaning-env)
