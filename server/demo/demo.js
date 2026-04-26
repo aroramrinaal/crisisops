@@ -137,6 +137,8 @@ function init() {
   els.terrain      = document.getElementById("terrain");
 
   buildUnits();
+  buildSlopeHatching();
+  buildTreeCanopy();
   buildBuildings();
   buildZones();
   buildUnitDots();
@@ -202,34 +204,104 @@ function makeRng(seed) {
   };
 }
 
-// drop small rects inside urban polygon AABBs to suggest dense city blocks
+// drop small rects inside urban polygon AABBs to suggest dense city blocks.
+// each building also drops a soft offset shadow beneath it (sun from NW)
+// to give the aerial view a hint of depth.
 function buildBuildings() {
   const g = document.getElementById("buildings");
   const rng = makeRng(42);
-  // [x1, y1, x2, y2, density, w, h, warm?]
   const clusters = [
-    { box: [27, 38, 51, 62], n: 26, w: 1.4, h: 2.2, warm: false }, // Old Market
-    { box: [43, 9,  70, 32], n: 14, w: 1.8, h: 2.6, warm: true  }, // N. Hospital
-    { box: [60, 45, 84, 65], n: 16, w: 2.6, h: 1.8, warm: false }, // Rail Yard (warehouses)
-    { box: [7,  69, 25, 90], n: 18, w: 1.2, h: 1.8, warm: false }, // Riverside
+    { box: [27, 38, 51, 62], n: 32, w: 1.4, h: 2.2, warm: false }, // Old Market — dense
+    { box: [43, 9,  70, 32], n: 18, w: 1.8, h: 2.6, warm: true  }, // N. Hospital
+    { box: [60, 45, 84, 65], n: 18, w: 2.8, h: 1.8, warm: false }, // Rail Yard (warehouses)
+    { box: [7,  69, 25, 90], n: 22, w: 1.2, h: 1.8, warm: false }, // Riverside
   ];
   const svgNS = "http://www.w3.org/2000/svg";
+  // shadows go on a sub-group rendered first so buildings sit on top
+  const shadowGrp = document.createElementNS(svgNS, "g");
+  const buildGrp  = document.createElementNS(svgNS, "g");
+  g.appendChild(shadowGrp);
+  g.appendChild(buildGrp);
+
   clusters.forEach(c => {
     const [x1, y1, x2, y2] = c.box;
     for (let i = 0; i < c.n; i++) {
-      const w = c.w * (0.7 + rng() * 0.7);
-      const h = c.h * (0.7 + rng() * 0.7);
+      const w = c.w * (0.7 + rng() * 0.8);
+      const h = c.h * (0.7 + rng() * 0.8);
       const x = x1 + rng() * (x2 - x1 - w);
       const y = y1 + rng() * (y2 - y1 - h);
+
+      // shadow (offset SE — sun from NW)
+      const sh = document.createElementNS(svgNS, "rect");
+      sh.setAttribute("x", (x + 0.35).toFixed(2));
+      sh.setAttribute("y", (y + 0.45).toFixed(2));
+      sh.setAttribute("width",  w.toFixed(2));
+      sh.setAttribute("height", h.toFixed(2));
+      sh.setAttribute("class", "t-bldg-shadow");
+      shadowGrp.appendChild(sh);
+
+      // building
       const r = document.createElementNS(svgNS, "rect");
       r.setAttribute("x", x.toFixed(2));
       r.setAttribute("y", y.toFixed(2));
       r.setAttribute("width",  w.toFixed(2));
       r.setAttribute("height", h.toFixed(2));
       r.setAttribute("class", c.warm ? "t-bldg-warm" : "t-bldg");
-      g.appendChild(r);
+      buildGrp.appendChild(r);
     }
   });
+}
+
+// stipple of small dots inside vegetation areas — reads as forest canopy
+function buildTreeCanopy() {
+  const g = document.getElementById("canopy");
+  if (!g) return;
+  const rng = makeRng(7);
+  const svgNS = "http://www.w3.org/2000/svg";
+  // tighter than the veg polygon AABBs to avoid stippling over water
+  const patches = [
+    { box: [38, 64, 76, 86], n: 90 },   // park / central greenspace
+    { box: [2,  2,  26, 20], n: 55 },   // NW forest
+    { box: [50, 36, 62, 46], n: 18 },   // hospital greens
+    { box: [14, 30, 30, 42], n: 28 },   // mid-west scrubland
+  ];
+  patches.forEach(p => {
+    const [x1, y1, x2, y2] = p.box;
+    for (let i = 0; i < p.n; i++) {
+      const cx = x1 + rng() * (x2 - x1);
+      const cy = y1 + rng() * (y2 - y1);
+      const c = document.createElementNS(svgNS, "circle");
+      c.setAttribute("cx", cx.toFixed(2));
+      c.setAttribute("cy", cy.toFixed(2));
+      c.setAttribute("r", (0.35 + rng() * 0.45).toFixed(2));
+      c.setAttribute("class", rng() > 0.5 ? "t-tree" : "t-tree-2");
+      g.appendChild(c);
+    }
+  });
+}
+
+// thin slope-hatch lines on the hill polygon — suggests elevation faces
+function buildSlopeHatching() {
+  const g = document.getElementById("slopes");
+  if (!g) return;
+  const rng = makeRng(11);
+  const svgNS = "http://www.w3.org/2000/svg";
+  // hill is roughly [70,0] - [100,40] — keep slightly inside to avoid water/edges
+  for (let i = 0; i < 55; i++) {
+    const x = 72 + rng() * 26;
+    const y = 2 + rng() * 36;
+    // slopes face down-right (toward bay) — short SE lines
+    const len = 0.8 + rng() * 1.6;
+    const x2 = x + len * 0.6;
+    const y2 = y + len * 0.9;
+    const l = document.createElementNS(svgNS, "line");
+    l.setAttribute("x1", x.toFixed(2));
+    l.setAttribute("y1", y.toFixed(2));
+    l.setAttribute("x2", x2.toFixed(2));
+    l.setAttribute("y2", y2.toFixed(2));
+    l.setAttribute("class", "t-slope");
+    g.appendChild(l);
+  }
 }
 
 function buildUnitDots() {

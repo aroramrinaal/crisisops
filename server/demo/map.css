@@ -72,6 +72,29 @@
 .t-bldg        { fill: #3d3a2c; stroke: #1a1812; stroke-width: 0.12; }
 .t-bldg-warm   { fill: #463d2e; stroke: #1a1812; stroke-width: 0.12; }
 .t-bldg-cool   { fill: #2e3438; stroke: #131618; stroke-width: 0.12; }
+.t-bldg-shadow { fill: rgba(0, 0, 0, 0.55); }
+
+/* tree canopy stipple inside vegetation polygons */
+.t-tree        { fill: #0f1d11; }
+.t-tree-2      { fill: #182b1c; }
+
+/* hill slope hatching */
+.t-slope       { stroke: rgba(180, 200, 220, 0.07); stroke-width: 0.4; fill: none; }
+
+/* river / inlet ripple lines */
+.t-ripple      { stroke: rgba(120, 180, 220, 0.18); stroke-width: 0.35; fill: none; stroke-dasharray: 0.8 1.2; }
+
+/* infrastructure */
+.t-bridge      { fill: #b0b8c0; stroke: #1a1812; stroke-width: 0.15; }
+.t-pier        { fill: #6a6055; stroke: #1a1812; stroke-width: 0.15; }
+.t-helipad     { fill: rgba(245, 204, 64, 0.10); stroke: #c9a13a; stroke-width: 0.4; }
+.t-helipad-cross { stroke: #c9a13a; stroke-width: 0.35; }
+
+/* range rings around FOB ALPHA */
+.t-range       { fill: none; stroke: rgba(220, 235, 250, 0.07); stroke-width: 0.4; stroke-dasharray: 0.8 1.4; }
+
+/* AO (area-of-operations) boundary */
+.t-ao          { fill: none; stroke: #c9a13a; stroke-width: 0.5; stroke-dasharray: 1.4 1.0; opacity: 0.35; }
 
 /* ---------- routes between zones ---------- */
 
@@ -245,6 +268,114 @@
   color: var(--blue);
   letter-spacing: 0.06em;
   white-space: nowrap;
+}
+
+/* ---------- compass rose (BL corner, fixed) ---------- */
+
+.compass-block {
+  position: absolute;
+  bottom: 14px;
+  left: 18px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  pointer-events: none;
+}
+
+.compass {
+  width: 54px; height: 54px;
+  display: block;
+}
+
+.c-ring        { fill: none; stroke: rgba(220, 235, 250, 0.18); stroke-width: 1; }
+.c-ring-inner  { fill: none; stroke: rgba(220, 235, 250, 0.10); stroke-width: 0.7; }
+.c-cross       { stroke: rgba(220, 235, 250, 0.20); stroke-width: 0.6; }
+.c-needle-n    { fill: var(--amber); }
+.c-needle-s    { fill: rgba(220, 235, 250, 0.30); }
+.c-label       {
+  fill: var(--text-2);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.c-label.n     { fill: var(--amber); }
+
+/* ---------- scale bar ---------- */
+
+.scale-bar {
+  font-family: var(--mono);
+  color: var(--text-2);
+  letter-spacing: 0.08em;
+}
+
+.sb-line {
+  display: flex;
+  align-items: center;
+  height: 8px;
+}
+.sb-seg {
+  height: 4px;
+  width: 36px;
+  border: 1px solid rgba(220, 235, 250, 0.25);
+}
+.sb-seg.dark  { background: rgba(220, 235, 250, 0.25); }
+.sb-labels {
+  display: flex;
+  justify-content: space-between;
+  width: 144px;   /* 2 segs × 72px? hmm — match below */
+  margin-top: 3px;
+  font-size: 9px;
+  color: var(--text-3);
+}
+.sb-labels.tight { width: 108px; }    /* 3 segs × 36px */
+
+/* ---------- subtle scan sweep ---------- */
+
+.scan-sweep {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+  overflow: hidden;
+}
+
+.scan-sweep::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 12%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(245, 204, 64, 0.025) 45%,
+    rgba(245, 204, 64, 0.045) 50%,
+    rgba(245, 204, 64, 0.025) 55%,
+    transparent 100%
+  );
+  animation: scan-sweep 16s linear infinite;
+}
+
+@keyframes scan-sweep {
+  0%   { left: -15%; }
+  100% { left: 110%; }
+}
+
+/* ---------- helipad pulse (just a sub-1px ring fade, no glow) ---------- */
+
+.t-helipad-pulse {
+  fill: none;
+  stroke: rgba(201, 161, 58, 0.5);
+  stroke-width: 0.3;
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: helipad-ring 3.2s ease-out infinite;
+}
+
+@keyframes helipad-ring {
+  0%   { transform: scale(0.4); opacity: 0.7; }
+  100% { transform: scale(2.2); opacity: 0; }
 }
 
 /* ---------- event banner (no glow) ---------- */

@@ -696,26 +696,69 @@ def log_gpu_preflight() -> None:
     except Exception as exc:
         print(f"[TRAIN] nvidia_smi_unavailable={exc}", flush=True)
 
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,cuda_version",
+                "--format=csv,noheader",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        if output:
+            print(f"[TRAIN] nvidia_smi_detail={output}", flush=True)
+    except Exception as exc:
+        print(f"[TRAIN] nvidia_smi_detail_unavailable={exc}", flush=True)
 
-def wait_for_cuda(torch, retries: int = 6, sleep_seconds: int = 5) -> None:
+
+def wait_for_cuda_runtime() -> None:
+    """Wait for CUDA in child processes so failed probes do not poison training."""
+    retries = int(os.getenv("CUDA_WAIT_RETRIES", "30"))
+    sleep_seconds = int(os.getenv("CUDA_WAIT_SLEEP_SECONDS", "10"))
     last_error: Optional[str] = None
     for attempt in range(1, retries + 1):
-        try:
-            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-                if not torch.cuda.is_initialized():
-                    torch.cuda.init()
-                return
-        except Exception as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, torch; "
+                    "print('torch_version=' + torch.__version__); "
+                    "print('cuda_visible_devices=' + str(os.environ.get('CUDA_VISIBLE_DEVICES'))); "
+                    "torch.cuda.init(); "
+                    "print('device_count=' + str(torch.cuda.device_count())); "
+                    "print('device_name=' + torch.cuda.get_device_name(0))"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            output = (probe.stdout or "").strip()
+            print(f"[TRAIN] cuda_ready probe={output}", flush=True)
+            return
+        last_error = ((probe.stderr or "") + (probe.stdout or "")).strip()
         print(
             f"[TRAIN] cuda_not_ready attempt={attempt}/{retries} "
             f"sleep_seconds={sleep_seconds} last_error={last_error or 'none'}",
             flush=True,
         )
-        time.sleep(sleep_seconds)
+        if attempt < retries:
+            time.sleep(sleep_seconds)
+    hint = (
+        " Error 802/system not yet initialized means nvidia-smi can see the "
+        "GPU but the CUDA runtime cannot initialize compute in this job "
+        "container yet. Increase CUDA_WAIT_RETRIES if it is transient; if it "
+        "persists for the full wait, the failure is below the GRPO/Unsloth "
+        "training code."
+    )
     raise RuntimeError(
         "CUDA did not become ready inside the HF Job. "
-        f"Last error: {last_error or 'torch.cuda.is_available() returned false'}"
+        f"Last error: {last_error or 'torch.cuda probe failed'}." + hint
     )
 
 
@@ -737,10 +780,12 @@ def main() -> None:
         flush=True,
     )
 
+    log_gpu_preflight()
+    wait_for_cuda_runtime()
+
     import torch
 
-    log_gpu_preflight()
-    wait_for_cuda(torch)
+    torch.cuda.init()
 
     print(
         f"[TRAIN] python={platform.python_version()} platform={platform.platform()}",
