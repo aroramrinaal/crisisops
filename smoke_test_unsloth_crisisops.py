@@ -1,0 +1,1107 @@
+"""
+Minimal HF Jobs smoke test for CrisisOps + Unsloth on a single GPU.
+
+This is intentionally not a real RL training run. It checks the wiring that
+matters before we spend credits on GRPO:
+
+1. CUDA is visible in the HF Job.
+2. An Unsloth 4-bit model loads successfully.
+3. A LoRA adapter attaches successfully.
+4. The script can talk to the deployed CrisisOps environment over HTTP.
+5. The model can produce at least one schema-valid CrisisOps JSON action.
+6. An episode of `single_zone_response` can complete within the step cap.
+
+Recommended HF Jobs command:
+
+hf jobs uv run \
+  --flavor h200 \
+  --timeout 2h \
+  --with unsloth \
+  --with transformers \
+  --with accelerate \
+  --with bitsandbytes \
+  --with peft \
+  --with torch \
+  smoke_test_unsloth_crisisops.py
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import json
+import os
+import platform
+import re
+import textwrap
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+ENV_NAME = "crisisops"
+ENV_URL = os.getenv("ENV_URL", "https://mrinaalarora-crisisops.hf.space").rstrip("/")
+MODEL_ID = os.getenv(
+    "MODEL_ID", "unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit"
+).strip()
+TASK_ID = os.getenv("TASK_ID", "single_zone_response").strip()
+MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH", "4096"))
+MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "256"))
+SMOKE_EPISODES = int(os.getenv("SMOKE_EPISODES", "2"))
+MAX_EPISODE_TURNS = int(os.getenv("MAX_EPISODE_TURNS", "8"))
+OUTPUT_PATH = os.getenv("SMOKE_OUTPUT_PATH", "smoke_test_summary.json").strip()
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.0"))
+TOP_P = float(os.getenv("TOP_P", "0.95"))
+
+TASK_TIERS: Dict[str, str] = {
+    "single_zone_response": "easy",
+    "multi_zone_triage": "medium",
+    "cascading_crisis": "hard",
+    "multi_district_coordination": "expert",
+}
+
+TASK_CONFIGS: Dict[str, Dict[str, int]] = {
+    "single_zone_response": {
+        "episode_cap": 8,
+        "expected_reports": 3,
+        "stream_done_step": 0,
+    },
+    "multi_zone_triage": {
+        "episode_cap": 15,
+        "expected_reports": 6,
+        "stream_done_step": 0,
+    },
+    "cascading_crisis": {
+        "episode_cap": 25,
+        "expected_reports": 10,
+        "stream_done_step": 12,
+    },
+    "multi_district_coordination": {
+        "episode_cap": 40,
+        "expected_reports": 16,
+        "stream_done_step": 20,
+    },
+}
+
+INCIDENT_UNIT_TYPES: Dict[str, set[str]] = {
+    "flood": {"rescue_team", "evac_bus"},
+    "collapse": {"rescue_team", "medical_unit"},
+    "medical_surge": {"medical_unit"},
+    "fire": {"rescue_team"},
+    "contamination": {"supply_truck", "medical_unit"},
+    "power_outage": {"supply_truck"},
+}
+
+TASK_BY_UNIT_TYPE = {
+    "rescue_team": "rescue",
+    "medical_unit": "medical",
+    "supply_truck": "supply_delivery",
+    "evac_bus": "evacuation",
+    "recon_drone": "recon",
+}
+
+ACTION_JSON_RE = re.compile(r"\{[\s\S]*\}")
+
+SYSTEM_PROMPT = textwrap.dedent(
+    """
+    You are an emergency operations commander for CrisisOps. Return exactly one
+    JSON object for the next environment action.
+
+    DEFAULT BEHAVIOR: copy the `Recommended action` block VERBATIM. The
+    deterministic policy that produced it already accounts for verification
+    status, unit-type matching, blocked zones, deadlines, and sitrep timing.
+    Deviate ONLY if the observation reveals something the recommendation
+    clearly missed. Use only IDs that appear in the visible observation.
+    Return JSON only. No markdown fences. No prose outside the JSON.
+    """
+).strip()
+
+TASK_BRIEFS: Dict[str, str] = {
+    "single_zone_response": (
+        "EASY tier. Verify the report stream, allocate the matching unit type "
+        "to the true zone before its deadline, then publish a sitrep."
+    ),
+    "multi_zone_triage": "MEDIUM tier with multiple concurrent incident zones.",
+    "cascading_crisis": "HARD tier where incidents stream in mid-episode.",
+    "multi_district_coordination": "EXPERT tier with mutual aid and comms degradation.",
+}
+
+ACTION_FORMAT_PROMPT = textwrap.dedent(
+    """
+    Valid action JSON shapes:
+    {"type":"verify_report","report_id":"report-1","verification_method":"cross_check","rationale":"..."}
+    {"type":"request_recon","zone_id":"zone-1","objective":"...","priority":"normal","report_id":null}
+    {"type":"allocate_unit","unit_id":"unit-1","zone_id":"zone-1","task":"rescue","priority":"high","report_ids":["report-1"]}
+    {"type":"reroute_unit","unit_id":"unit-1","route":{"route_id":"...","from_zone_id":"...","to_zone_id":"...","status":"open","travel_time_minutes":10,"hazards":[]},"reason":"..."}
+    {"type":"issue_evacuation","zone_id":"zone-1","urgency":"critical","message":"...","route_id":null,"destination_shelter_id":null}
+    {"type":"open_shelter","shelter":{"shelter_id":"...","zone_id":"...","name":"...","status":"open","capacity_total":100,"capacity_available":50,"supplies":{}},"reason":"..."}
+    {"type":"dispatch_supplies","supplies":{"water":100},"destination_zone_id":"zone-1","priority":"high","unit_id":null,"destination_shelter_id":null}
+    {"type":"flag_false_alarm","report_id":"report-1","rationale":"...","evidence":["..."]}
+    {"type":"publish_sitrep","payload":{"incidents_confirmed":["report-1"],"incidents_resolved":["zone-1"],"unresolved_risks":[],"false_alarms_detected":[],"summary_text":"..."}}
+    {"type":"noop","reason":"..."}
+    """
+).strip()
+
+
+@dataclass
+class EpisodeMemory:
+    verified_report_ids: set[str]
+    true_report_ids: set[str]
+    false_report_ids: set[str]
+    flagged_false_ids: set[str]
+    allocated_unit_ids: set[str]
+    allocated_types_by_zone: Dict[str, set[str]]
+    resolved_zone_ids: set[str]
+    known_reports: Dict[str, dict]
+    known_zones: Dict[str, dict]
+    known_units: Dict[str, dict]
+
+    def __init__(self) -> None:
+        self.verified_report_ids = set()
+        self.true_report_ids = set()
+        self.false_report_ids = set()
+        self.flagged_false_ids = set()
+        self.allocated_unit_ids = set()
+        self.allocated_types_by_zone = {}
+        self.resolved_zone_ids = set()
+        self.known_reports = {}
+        self.known_zones = {}
+        self.known_units = {}
+
+    def update_from_observation(self, obs: Mapping[str, Any]) -> None:
+        for zone in obs.get("visible_zones", []) or []:
+            zone_id = str(zone.get("zone_id", ""))
+            if zone_id:
+                self.known_zones[zone_id] = dict(zone)
+
+        for unit in obs.get("resources", []) or []:
+            unit_id = str(unit.get("unit_id", ""))
+            if not unit_id:
+                continue
+            self.known_units[unit_id] = dict(unit)
+            zone_id = unit.get("current_zone_id")
+            unit_type = unit.get("unit_type")
+            if unit.get("status") in {"assigned", "en_route"} and zone_id and unit_type:
+                self.allocated_unit_ids.add(unit_id)
+                self.allocated_types_by_zone.setdefault(str(zone_id), set()).add(
+                    str(unit_type)
+                )
+                if _unit_type_matches_zone(str(unit_type), self.known_zones.get(str(zone_id), {})):
+                    self.resolved_zone_ids.add(str(zone_id))
+
+        for report in obs.get("reports", []) or []:
+            report_id = str(report.get("report_id", ""))
+            if not report_id:
+                continue
+            self.known_reports[report_id] = dict(report)
+            status = report.get("verified_status")
+            confidence = report.get("confidence")
+            if status == "verified":
+                self.verified_report_ids.add(report_id)
+                self.true_report_ids.add(report_id)
+            elif status in {"disputed", "false_alarm"}:
+                self.verified_report_ids.add(report_id)
+                self.false_report_ids.add(report_id)
+            elif confidence == "sensor_confirmed":
+                self.true_report_ids.add(report_id)
+
+    def remember_action(self, action: Mapping[str, Any]) -> None:
+        action_type = action.get("type")
+        if action_type == "verify_report":
+            report_id = str(action.get("report_id", ""))
+            if report_id:
+                self.verified_report_ids.add(report_id)
+        elif action_type == "flag_false_alarm":
+            report_id = str(action.get("report_id", ""))
+            if report_id:
+                self.flagged_false_ids.add(report_id)
+                self.false_report_ids.add(report_id)
+        elif action_type == "allocate_unit":
+            unit_id = str(action.get("unit_id", ""))
+            zone_id = str(action.get("zone_id", ""))
+            unit = self.known_units.get(unit_id, {})
+            unit_type = str(unit.get("unit_type", ""))
+            if unit_id:
+                self.allocated_unit_ids.add(unit_id)
+            if zone_id and unit_type:
+                self.allocated_types_by_zone.setdefault(zone_id, set()).add(unit_type)
+                if _unit_type_matches_zone(unit_type, self.known_zones.get(zone_id, {})):
+                    self.resolved_zone_ids.add(zone_id)
+
+
+@dataclass
+class SmokeStats:
+    episodes_started: int = 0
+    episodes_completed: int = 0
+    valid_model_actions: int = 0
+    invalid_model_actions: int = 0
+    fallback_actions: int = 0
+    total_steps: int = 0
+    total_rewards: float = 0.0
+    final_scores: List[float] | None = None
+    episode_sources: List[List[str]] | None = None
+    errors: List[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.final_scores is None:
+            self.final_scores = []
+        if self.episode_sources is None:
+            self.episode_sources = []
+        if self.errors is None:
+            self.errors = []
+
+
+def post_json(path: str, payload: Mapping[str, Any]) -> dict:
+    request = Request(
+        f"{ENV_URL}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from {path}: {body}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not reach {ENV_URL}{path}: {exc}") from exc
+
+
+def env_reset(task_id: str) -> dict:
+    payload: Dict[str, Any] = {"task_id": task_id}
+    if os.getenv("SEED"):
+        payload["seed"] = int(os.environ["SEED"])
+    return post_json("/reset", payload)
+
+
+def env_step(session_id: str, action: Mapping[str, Any]) -> dict:
+    return post_json("/step", {"session_id": session_id, "action": dict(action)})
+
+
+def log_step(
+    step: int,
+    action: str,
+    reward: float,
+    done: bool,
+    error: Optional[str],
+    source: str,
+) -> None:
+    error_val = error if error else "null"
+    print(
+        f"[STEP] step={step} action={action} source={source} reward={reward:.2f} "
+        f"done={str(done).lower()} error={error_val}",
+        flush=True,
+    )
+
+
+def parse_action_json(response_text: str) -> dict:
+    match = ACTION_JSON_RE.search(response_text or "")
+    if not match:
+        raise ValueError("model response did not contain a JSON object")
+    parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict) or "type" not in parsed:
+        raise ValueError("model response was not an action object")
+    return parsed
+
+
+def sanitize_model_action(parsed: Mapping[str, Any]) -> dict:
+    action_type = str(parsed.get("type", ""))
+    if not action_type:
+        raise ValueError("model response missing type")
+
+    if action_type == "verify_report":
+        return {
+            "type": "verify_report",
+            "report_id": _required_str(parsed, "report_id"),
+            "verification_method": _enum_value(
+                parsed.get("verification_method"),
+                {
+                    "cross_check",
+                    "contact_source",
+                    "field_recon",
+                    "sensor_review",
+                    "official_confirmation",
+                },
+                "cross_check",
+            ),
+            "rationale": _text_value(parsed.get("rationale"), "Verify report."),
+        }
+    if action_type == "request_recon":
+        return {
+            "type": "request_recon",
+            "zone_id": _required_str(parsed, "zone_id"),
+            "objective": _text_value(parsed.get("objective"), "Clarify incident status."),
+            "priority": _priority_value(parsed.get("priority"), "normal"),
+            "report_id": parsed.get("report_id"),
+        }
+    if action_type == "allocate_unit":
+        return {
+            "type": "allocate_unit",
+            "unit_id": _required_str(parsed, "unit_id"),
+            "zone_id": _required_str(parsed, "zone_id"),
+            "task": _enum_value(
+                parsed.get("task"),
+                {
+                    "rescue",
+                    "medical",
+                    "evacuation",
+                    "fire_suppression",
+                    "supply_delivery",
+                    "recon",
+                    "route_clearance",
+                },
+                "recon",
+            ),
+            "priority": _priority_value(parsed.get("priority"), "normal"),
+            "report_ids": _string_list(parsed.get("report_ids")),
+        }
+    if action_type == "reroute_unit":
+        route = parsed.get("route")
+        if not isinstance(route, Mapping):
+            raise ValueError("reroute_unit requires route object")
+        return {
+            "type": "reroute_unit",
+            "unit_id": _required_str(parsed, "unit_id"),
+            "route": dict(route),
+            "reason": _text_value(parsed.get("reason"), "Use safer route."),
+        }
+    if action_type == "issue_evacuation":
+        return {
+            "type": "issue_evacuation",
+            "zone_id": _required_str(parsed, "zone_id"),
+            "urgency": _priority_value(parsed.get("urgency"), "high"),
+            "message": _text_value(parsed.get("message"), "Evacuate immediately."),
+            "route_id": parsed.get("route_id"),
+            "destination_shelter_id": parsed.get("destination_shelter_id"),
+        }
+    if action_type == "open_shelter":
+        shelter = parsed.get("shelter")
+        if not isinstance(shelter, Mapping):
+            raise ValueError("open_shelter requires shelter object")
+        return {
+            "type": "open_shelter",
+            "shelter": dict(shelter),
+            "reason": _text_value(parsed.get("reason"), "Open shelter capacity."),
+        }
+    if action_type == "dispatch_supplies":
+        supplies = parsed.get("supplies")
+        if not isinstance(supplies, Mapping) or not supplies:
+            raise ValueError("dispatch_supplies requires non-empty supplies")
+        sanitized_supplies = {
+            str(key): int(value)
+            for key, value in supplies.items()
+            if isinstance(value, (int, float)) and value > 0
+        }
+        if not sanitized_supplies:
+            raise ValueError("dispatch_supplies requires positive supply amounts")
+        return {
+            "type": "dispatch_supplies",
+            "supplies": sanitized_supplies,
+            "destination_zone_id": _required_str(parsed, "destination_zone_id"),
+            "priority": _priority_value(parsed.get("priority"), "normal"),
+            "unit_id": parsed.get("unit_id"),
+            "destination_shelter_id": parsed.get("destination_shelter_id"),
+        }
+    if action_type == "flag_false_alarm":
+        return {
+            "type": "flag_false_alarm",
+            "report_id": _required_str(parsed, "report_id"),
+            "rationale": _text_value(parsed.get("rationale"), "Report is disputed."),
+            "evidence": _string_list(parsed.get("evidence")),
+        }
+    if action_type == "publish_sitrep":
+        payload = parsed.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("publish_sitrep requires payload object")
+        return {
+            "type": "publish_sitrep",
+            "payload": {
+                "incidents_confirmed": _string_list(payload.get("incidents_confirmed")),
+                "incidents_resolved": _string_list(payload.get("incidents_resolved")),
+                "unresolved_risks": _string_list(payload.get("unresolved_risks")),
+                "false_alarms_detected": _string_list(
+                    payload.get("false_alarms_detected")
+                ),
+                "summary_text": _text_value(
+                    payload.get("summary_text"), "Situation report published."
+                )[:800],
+            },
+        }
+    if action_type == "noop":
+        return {
+            "type": "noop",
+            "reason": _text_value(parsed.get("reason"), "Waiting for more evidence."),
+        }
+    raise ValueError(f"unknown action type: {action_type}")
+
+
+def _required_str(payload: Mapping[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"action missing required string field: {key}")
+    return value.strip()
+
+
+def _text_value(value: Any, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default
+
+
+def _enum_value(value: Any, allowed: set[str], default: str) -> str:
+    if isinstance(value, str) and value in allowed:
+        return value
+    return default
+
+
+def _priority_value(value: Any, default: str) -> str:
+    return _enum_value(
+        str(value) if value is not None else value,
+        {"low", "normal", "high", "critical"},
+        default,
+    )
+
+
+def _string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, (str, int))]
+
+
+def grade_from_observation(obs: Mapping[str, Any], rewards: Iterable[float]) -> float:
+    metadata = obs.get("metadata") or {}
+    if "terminal_score" in metadata:
+        return float(metadata["terminal_score"])
+    if "score" in metadata:
+        return float(metadata["score"])
+    reward_total = sum(float(reward) for reward in rewards)
+    return max(0.01, min(0.99, 0.35 + reward_total))
+
+
+def make_policy_action(task_id: str, obs: Mapping[str, Any], memory: EpisodeMemory) -> dict:
+    memory.update_from_observation(obs)
+    config = TASK_CONFIGS[task_id]
+    time_step = int(obs.get("time_step", 0) or 0)
+    episode_cap = int((obs.get("metadata") or {}).get("episode_cap", config["episode_cap"]))
+    remaining = max(0, episode_cap - time_step)
+
+    if remaining <= 1:
+        return build_sitrep(memory)
+
+    urgent_allocation = next_allocation_action(memory, critical_only=True)
+    if urgent_allocation is not None:
+        return urgent_allocation
+
+    false_action = next_false_alarm_action(memory)
+    if false_action is not None and remaining > 2:
+        return false_action
+
+    verification = next_verification_action(memory)
+    if verification is not None and remaining > 2:
+        return verification
+
+    allocation = next_allocation_action(memory, critical_only=False)
+    if allocation is not None:
+        return allocation
+
+    if should_publish(task_id, obs, memory, remaining):
+        return build_sitrep(memory)
+
+    return {
+        "type": "noop",
+        "reason": "Wait for additional streamed reports or mutual-aid availability.",
+    }
+
+
+def next_false_alarm_action(memory: EpisodeMemory) -> Optional[dict]:
+    for report_id in sorted(memory.false_report_ids):
+        if report_id in memory.flagged_false_ids:
+            continue
+        return {
+            "type": "flag_false_alarm",
+            "report_id": report_id,
+            "rationale": "Verification disputed this report, so mark it as a false alarm.",
+            "evidence": ["verification_status_disputed"],
+        }
+    return None
+
+
+def next_verification_action(memory: EpisodeMemory) -> Optional[dict]:
+    reports = sorted(
+        memory.known_reports.values(),
+        key=lambda report: (
+            _zone_sort_key(memory.known_zones.get(str(report.get("zone_id", "")), {})),
+            int(report.get("reveal_at_step", report.get("time_step", 0)) or 0),
+            str(report.get("report_id", "")),
+        ),
+    )
+    for report in reports:
+        report_id = str(report.get("report_id", ""))
+        if not report_id or report_id in memory.verified_report_ids:
+            continue
+        if report_id in memory.true_report_ids and report.get("confidence") == "sensor_confirmed":
+            continue
+        if report.get("verified_status") in {"verified", "disputed", "false_alarm"}:
+            continue
+        return {
+            "type": "verify_report",
+            "report_id": report_id,
+            "verification_method": _verification_method(report),
+            "rationale": "Confirm report truth before committing scarce response units.",
+        }
+    return None
+
+
+def next_allocation_action(
+    memory: EpisodeMemory,
+    critical_only: bool = False,
+) -> Optional[dict]:
+    zones = sorted(memory.known_zones.values(), key=_zone_sort_key)
+    true_zone_ids = _true_zone_ids(memory)
+    for zone in zones:
+        zone_id = str(zone.get("zone_id", ""))
+        if not zone_id or zone_id not in true_zone_ids:
+            continue
+        if critical_only and int(zone.get("severity", 0) or 0) < 4:
+            continue
+        if zone.get("access_status") == "blocked":
+            continue
+        needed_types = _required_unit_types(zone)
+        allocated_types = memory.allocated_types_by_zone.get(zone_id, set())
+        for unit_type in sorted(needed_types - allocated_types):
+            unit = _best_available_unit(memory, unit_type, zone)
+            if unit is None:
+                continue
+            return {
+                "type": "allocate_unit",
+                "unit_id": unit["unit_id"],
+                "zone_id": zone_id,
+                "task": TASK_BY_UNIT_TYPE.get(unit_type, "recon"),
+                "priority": _priority_for_zone(zone),
+                "report_ids": _supporting_true_reports(memory, zone_id),
+            }
+    return None
+
+
+def should_publish(
+    task_id: str,
+    obs: Mapping[str, Any],
+    memory: EpisodeMemory,
+    remaining: int,
+) -> bool:
+    if remaining <= 2:
+        return True
+    config = TASK_CONFIGS[task_id]
+    time_step = int(obs.get("time_step", 0) or 0)
+    visible_count = len(memory.known_reports)
+    stream_complete = (
+        visible_count >= config["expected_reports"]
+        or time_step >= config["stream_done_step"]
+    )
+    no_more_known_work = (
+        next_false_alarm_action(memory) is None
+        and next_allocation_action(memory, critical_only=False) is None
+        and next_verification_action(memory) is None
+    )
+    return stream_complete and no_more_known_work
+
+
+def build_sitrep(memory: EpisodeMemory) -> dict:
+    confirmed = sorted(memory.true_report_ids)
+    false_alarms = sorted(memory.false_report_ids | memory.flagged_false_ids)
+    true_zones = _true_zone_ids(memory)
+    resolved = sorted(memory.resolved_zone_ids & true_zones)
+    unresolved = sorted(true_zones - set(resolved))
+    summary = (
+        "Verified reports were triaged by deadline, severity, and population at risk. "
+        f"Confirmed {len(confirmed)} incident reports, resolved {len(resolved)} zones, "
+        f"and identified {len(false_alarms)} false alarms."
+    )
+    return {
+        "type": "publish_sitrep",
+        "payload": {
+            "incidents_confirmed": confirmed,
+            "incidents_resolved": resolved,
+            "unresolved_risks": unresolved,
+            "false_alarms_detected": false_alarms,
+            "summary_text": summary,
+        },
+    }
+
+
+def _true_zone_ids(memory: EpisodeMemory) -> set[str]:
+    return {
+        str(report.get("zone_id", ""))
+        for report_id, report in memory.known_reports.items()
+        if report_id in memory.true_report_ids and report.get("zone_id")
+    }
+
+
+def _supporting_true_reports(memory: EpisodeMemory, zone_id: str) -> List[str]:
+    return sorted(
+        report_id
+        for report_id, report in memory.known_reports.items()
+        if report_id in memory.true_report_ids and report.get("zone_id") == zone_id
+    )
+
+
+def _required_unit_types(zone: Mapping[str, Any]) -> set[str]:
+    required = zone.get("required_unit_types") or []
+    if required:
+        return {str(unit_type) for unit_type in required}
+    return set(INCIDENT_UNIT_TYPES.get(str(zone.get("incident_type", "")), {"recon_drone"}))
+
+
+def _best_available_unit(
+    memory: EpisodeMemory,
+    unit_type: str,
+    zone: Mapping[str, Any],
+) -> Optional[dict]:
+    candidates = []
+    zone_district = zone.get("district_id")
+    for unit in memory.known_units.values():
+        if unit.get("unit_id") in memory.allocated_unit_ids:
+            continue
+        if unit.get("unit_type") != unit_type:
+            continue
+        if unit.get("status") != "available":
+            continue
+        candidates.append(unit)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda unit: (
+            0 if unit.get("district_id") in {None, zone_district} else 1,
+            int(unit.get("fatigue", 0) or 0),
+            int(unit.get("travel_cost", 1) or 1),
+            str(unit.get("unit_id", "")),
+        )
+    )
+    return dict(candidates[0])
+
+
+def _unit_type_matches_zone(unit_type: str, zone: Mapping[str, Any]) -> bool:
+    return unit_type in _required_unit_types(zone)
+
+
+def _zone_sort_key(zone: Mapping[str, Any]) -> Tuple[int, int, str]:
+    return (
+        int(zone.get("deadline_steps", 99) or 99),
+        -int(zone.get("severity", 0) or 0) * int(zone.get("population_at_risk", 0) or 0),
+        str(zone.get("zone_id", "")),
+    )
+
+
+def _priority_for_zone(zone: Mapping[str, Any]) -> str:
+    severity = int(zone.get("severity", 0) or 0)
+    if severity >= 5:
+        return "critical"
+    if severity >= 4:
+        return "high"
+    if severity <= 2:
+        return "low"
+    return "normal"
+
+
+def _verification_method(report: Mapping[str, Any]) -> str:
+    source = report.get("source")
+    confidence = report.get("confidence")
+    if confidence == "sensor_confirmed":
+        return "sensor_review"
+    if source == "official":
+        return "official_confirmation"
+    if source in {"field_team", "media"}:
+        return "cross_check"
+    return "contact_source"
+
+
+def _compact_observation(obs: Mapping[str, Any]) -> dict:
+    return {
+        "time_step": obs.get("time_step"),
+        "metadata": obs.get("metadata", {}),
+        "visible_zones": [
+            {
+                "zone_id": zone.get("zone_id"),
+                "name": zone.get("name"),
+                "incident_type": zone.get("incident_type"),
+                "severity": zone.get("severity"),
+                "population_at_risk": zone.get("population_at_risk"),
+                "deadline_steps": zone.get("deadline_steps"),
+                "access_status": zone.get("access_status"),
+                "district_id": zone.get("district_id"),
+                "required_unit_types": sorted(zone.get("required_unit_types") or []),
+            }
+            for zone in (obs.get("visible_zones") or [])
+        ],
+        "reports": [
+            {
+                "report_id": report.get("report_id"),
+                "zone_id": report.get("zone_id"),
+                "source": report.get("source"),
+                "report_type": report.get("report_type"),
+                "severity": report.get("severity"),
+                "description": (str(report.get("description") or ""))[:200],
+                "verified_status": report.get("verified_status"),
+                "confidence": report.get("confidence"),
+                "reveal_at_step": report.get("reveal_at_step"),
+            }
+            for report in (obs.get("reports") or [])
+        ],
+        "resources": [
+            {
+                "unit_id": unit.get("unit_id"),
+                "unit_type": unit.get("unit_type"),
+                "status": unit.get("status"),
+                "current_zone_id": unit.get("current_zone_id"),
+                "capacity": unit.get("capacity"),
+                "capabilities": unit.get("capabilities"),
+                "fatigue": unit.get("fatigue"),
+                "district_id": unit.get("district_id"),
+                "mutual_aid_unlock_step": unit.get("mutual_aid_unlock_step"),
+            }
+            for unit in (obs.get("resources") or [])
+        ],
+        "incident_log": (obs.get("incident_log") or [])[-6:],
+    }
+
+
+def _error_from_observation(obs: Mapping[str, Any]) -> Optional[str]:
+    logs = [str(item) for item in (obs.get("incident_log") or [])]
+    negative = [
+        log
+        for log in logs
+        if any(term in log.lower() for term in ("rejected", "invalid", "error"))
+    ]
+    return "; ".join(negative) if negative else None
+
+
+def load_unsloth_model() -> Tuple[Any, Any]:
+    import torch
+    from unsloth import FastLanguageModel
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available; this smoke test requires a GPU job.")
+
+    print(
+        f"[SMOKE] python={platform.python_version()} platform={platform.platform()}",
+        flush=True,
+    )
+    print(
+        f"[SMOKE] cuda_device_count={torch.cuda.device_count()} "
+        f"device_name={torch.cuda.get_device_name(0)} "
+        f"cuda_capability={torch.cuda.get_device_capability(0)}",
+        flush=True,
+    )
+    print(
+        f"[SMOKE] loading model={MODEL_ID} max_seq_length={MAX_SEQ_LENGTH}",
+        flush=True,
+    )
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=MODEL_ID,
+        max_seq_length=MAX_SEQ_LENGTH,
+        load_in_4bit=True,
+    )
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=16,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
+        lora_alpha=16,
+        lora_dropout=0,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=3407,
+        use_rslora=False,
+    )
+    FastLanguageModel.for_inference(model)
+    print("[SMOKE] model loaded and LoRA adapter attached", flush=True)
+    return model, tokenizer
+
+
+def render_prompt(
+    task_id: str,
+    obs: Mapping[str, Any],
+    fallback_action: Mapping[str, Any],
+    history: List[Dict[str, Any]],
+) -> str:
+    brief = TASK_BRIEFS.get(task_id, "(no brief)")
+    recent_steps = _history_lines(history)
+    episode_cap = (obs.get("metadata") or {}).get(
+        "episode_cap", TASK_CONFIGS[task_id]["episode_cap"]
+    )
+    return (
+        f"Task: {task_id}\n"
+        f"Brief: {brief}\n"
+        f"Time step: {obs.get('time_step')}\n"
+        f"Episode cap: {episode_cap}\n\n"
+        f"Action contract:\n{ACTION_FORMAT_PROMPT}\n\n"
+        f"Recent steps (most recent last):\n{recent_steps}\n\n"
+        f"Current observation:\n"
+        f"{json.dumps(_compact_observation(obs), sort_keys=True)}\n\n"
+        f"Recommended action:\n"
+        f"{json.dumps(dict(fallback_action), sort_keys=True)}\n\n"
+        "Return exactly one JSON object and nothing else."
+    )
+
+
+def _history_lines(history: List[Dict[str, Any]]) -> str:
+    if not history:
+        return "  (none yet)"
+    lines = []
+    for item in history[-5:]:
+        lines.append(
+            f"  step={item['step']} action={item['action']} "
+            f"source={item['source']} reward={item['reward']:+.2f}"
+        )
+    return "\n".join(lines)
+
+
+def choose_model_action(
+    model: Any,
+    tokenizer: Any,
+    task_id: str,
+    obs: Mapping[str, Any],
+    fallback_action: Mapping[str, Any],
+    history: List[Dict[str, Any]],
+) -> Tuple[dict, str, str | None]:
+    import torch
+
+    prompt = render_prompt(task_id, obs, fallback_action, history)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    inputs = tokenizer([text], return_tensors="pt")
+    device = next(model.parameters()).device
+    inputs = {name: tensor.to(device) for name, tensor in inputs.items()}
+    generate_kwargs = {
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "do_sample": TEMPERATURE > 0,
+        "use_cache": True,
+        "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+    }
+    if TEMPERATURE > 0:
+        generate_kwargs["temperature"] = TEMPERATURE
+        generate_kwargs["top_p"] = TOP_P
+
+    with torch.inference_mode():
+        generated = model.generate(
+            **inputs,
+            **generate_kwargs,
+        )
+
+    prompt_tokens = inputs["input_ids"].shape[1]
+    response_text = tokenizer.decode(
+        generated[0][prompt_tokens:],
+        skip_special_tokens=True,
+    ).strip()
+
+    try:
+        parsed = parse_action_json(response_text)
+        action = sanitize_model_action(parsed)
+        return action, "model_valid", response_text
+    except Exception as exc:
+        short_text = response_text[:400].replace("\n", " ")
+        error = f"{type(exc).__name__}: {exc}; raw={short_text}"
+        return dict(fallback_action), "fallback_policy", error
+
+
+def run_episode(
+    model: Any,
+    tokenizer: Any,
+    task_id: str,
+    stats: SmokeStats,
+) -> Dict[str, Any]:
+    reset_response = env_reset(task_id)
+    session_id = str(reset_response.get("session_id", ""))
+    if not session_id:
+        raise RuntimeError("Reset response did not include session_id")
+
+    obs = reset_response.get("observation") or reset_response
+    done = bool(reset_response.get("done", False) or obs.get("done", False))
+    memory = EpisodeMemory()
+    memory.update_from_observation(obs)
+
+    rewards: List[float] = []
+    action_sources: List[str] = []
+    history: List[Dict[str, Any]] = []
+    final_obs: Dict[str, Any] = dict(obs)
+
+    print(
+        f"[START] task={task_id} env=crisisops policy=local_unsloth model={MODEL_ID}",
+        flush=True,
+    )
+    for step in range(1, MAX_EPISODE_TURNS + 1):
+        if done:
+            break
+
+        fallback_action = make_policy_action(task_id, obs, memory)
+        action, source, detail = choose_model_action(
+            model=model,
+            tokenizer=tokenizer,
+            task_id=task_id,
+            obs=obs,
+            fallback_action=fallback_action,
+            history=history,
+        )
+        if source == "model_valid":
+            stats.valid_model_actions += 1
+        else:
+            stats.invalid_model_actions += 1
+            stats.fallback_actions += 1
+            if detail:
+                stats.errors.append(detail)
+
+        response = env_step(session_id, action)
+        next_obs = response.get("observation") or response
+        reward = float(response.get("reward") or next_obs.get("reward") or 0.0)
+        done = bool(response.get("done", False) or next_obs.get("done", False))
+
+        memory.remember_action(action)
+        memory.update_from_observation(next_obs)
+
+        rewards.append(reward)
+        action_sources.append(source)
+        stats.total_steps += 1
+        stats.total_rewards += reward
+        final_obs = dict(next_obs)
+
+        error = _error_from_observation(next_obs)
+        history.append(
+            {
+                "step": step,
+                "action": str(action.get("type", "unknown")),
+                "source": source,
+                "reward": reward,
+                "done": done,
+            }
+        )
+        log_step(
+            step=step,
+            action=str(action.get("type", "unknown")),
+            reward=reward,
+            done=done,
+            error=error,
+            source=source,
+        )
+        obs = next_obs
+
+    score = grade_from_observation(final_obs, rewards)
+    success = bool(done)
+    if success:
+        stats.episodes_completed += 1
+    stats.final_scores.append(score)
+    stats.episode_sources.append(action_sources)
+    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
+    source_counts: Dict[str, int] = {}
+    for source in action_sources:
+        source_counts[source] = source_counts.get(source, 0) + 1
+    source_summary = (
+        ",".join(f"{name}:{count}" for name, count in sorted(source_counts.items()))
+        if source_counts
+        else "none"
+    )
+    print(
+        f"[END] success={str(success).lower()} steps={len(rewards)} "
+        f"score={score:.3f} sources={source_summary} rewards={rewards_str}",
+        flush=True,
+    )
+    return {
+        "completed": success,
+        "score": score,
+        "steps": len(rewards),
+        "sources": action_sources,
+    }
+
+
+def save_summary(stats: SmokeStats, passed: bool) -> None:
+    payload = {
+        "passed": passed,
+        "env_url": ENV_URL,
+        "task_id": TASK_ID,
+        "task_tier": TASK_TIERS.get(TASK_ID),
+        "model_id": MODEL_ID,
+        "smoke_episodes": SMOKE_EPISODES,
+        "max_episode_turns": MAX_EPISODE_TURNS,
+        **asdict(stats),
+    }
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(f"[SMOKE] wrote summary to {OUTPUT_PATH}", flush=True)
+
+
+def evaluate_pass_fail(stats: SmokeStats) -> Tuple[bool, List[str]]:
+    reasons: List[str] = []
+    if stats.episodes_started < 1:
+        reasons.append("no episodes started")
+    if stats.episodes_completed < 1:
+        reasons.append("no episode completed")
+    if stats.valid_model_actions < 1:
+        reasons.append("model produced zero schema-valid actions")
+    if stats.total_steps < 1:
+        reasons.append("no environment steps executed")
+    return (len(reasons) == 0), reasons
+
+
+def main() -> None:
+    if TASK_ID != "single_zone_response":
+        raise ValueError(
+            f"This smoke test is intentionally scoped to single_zone_response, got {TASK_ID!r}"
+        )
+
+    print(
+        f"[SMOKE] env_url={ENV_URL} task_id={TASK_ID} model_id={MODEL_ID} "
+        f"episodes={SMOKE_EPISODES} max_episode_turns={MAX_EPISODE_TURNS}",
+        flush=True,
+    )
+    model, tokenizer = load_unsloth_model()
+    stats = SmokeStats()
+
+    for index in range(1, SMOKE_EPISODES + 1):
+        print(f"[SMOKE] starting episode {index}/{SMOKE_EPISODES}", flush=True)
+        stats.episodes_started += 1
+        episode = run_episode(model=model, tokenizer=tokenizer, task_id=TASK_ID, stats=stats)
+        print(
+            f"[SMOKE] episode={index} completed={str(episode['completed']).lower()} "
+            f"score={episode['score']:.3f} steps={episode['steps']} "
+            f"sources={','.join(episode['sources']) if episode['sources'] else 'none'}",
+            flush=True,
+        )
+
+    passed, reasons = evaluate_pass_fail(stats)
+    save_summary(stats, passed)
+
+    average_score = (
+        sum(stats.final_scores) / len(stats.final_scores) if stats.final_scores else 0.0
+    )
+    print(
+        f"[SMOKE] valid_model_actions={stats.valid_model_actions} "
+        f"invalid_model_actions={stats.invalid_model_actions} "
+        f"fallback_actions={stats.fallback_actions} "
+        f"episodes_completed={stats.episodes_completed}/{stats.episodes_started} "
+        f"average_score={average_score:.3f}",
+        flush=True,
+    )
+
+    if not passed:
+        print(f"[SMOKE] FAIL reasons={'; '.join(reasons)}", flush=True)
+        raise SystemExit(1)
+    print("[SMOKE] PASS", flush=True)
+
+
+if __name__ == "__main__":
+    main()
