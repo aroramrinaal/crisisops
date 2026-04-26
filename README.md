@@ -15,7 +15,17 @@ tags:
 
 **An OpenEnv RL environment for training LLMs as crisis command operators.**
 
-Live demo: https://huggingface.co/spaces/mrinaalarora/crisisops        Code: https://github.com/aroramrinaal/crisisops
+## Links
+
+- **Hugging Face Space:** https://huggingface.co/spaces/mrinaalarora/crisisops
+- **GitHub repo:** https://github.com/aroramrinaal/crisisops
+- **Live demo UI:** https://mrinaalarora-crisisops.hf.space/demo
+- **Training scripts:** https://github.com/aroramrinaal/crisisops/tree/main/training-scripts
+- **Trackio dashboard:** https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden
+- **Blog / writeup:** *to be added*
+- **Earlier hackathon submissions:**
+  - [json_cleaning_env](https://huggingface.co/spaces/mrinaalarora/json-cleaning-env)
+  - [DryLabSim](https://huggingface.co/spaces/mrinaalarora/drylabsim)
 
 <img width="1710" height="897" alt="Screenshot 2026-04-26 at 4 07 40 PM" src="https://github.com/user-attachments/assets/becba5eb-b786-4b01-95c6-3397ddc45148" />
 
@@ -118,18 +128,6 @@ The exact training scripts are in [`training-scripts/`](https://github.com/arora
 [<img width="1710" alt="Trackio GRPO dashboard — medium task run showing reward climbing, loss falling, KL divergence, grad norm, learning rate decay, completion length, and mean KL across ~200 steps" src="assets/trackio_dashboard.png" />](https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden)
 
 *Reward and loss curves from the three GRPO runs (Trackio dashboard). The reward climbs steadily as the model learns to verify reports before allocating units and to publish coherent sitreps at the end of each episode.*
-
-## Links
-
-- **Hugging Face Space:** https://huggingface.co/spaces/mrinaalarora/crisisops
-- **GitHub repo:** https://github.com/aroramrinaal/crisisops
-- **Live demo UI:** https://mrinaalarora-crisisops.hf.space/demo
-- **Training scripts:** https://github.com/aroramrinaal/crisisops/tree/main/training-scripts
-- **Trackio dashboard:** https://mrinaalarora-trackio.hf.space/?project=crisisops-small-model-training&run_ids=easy-task-grpo-run-1%2Cmedium-task-grpo-run-1&sidebar=hidden&navbar=hidden
-- **Blog / writeup:** *to be added*
-- **Earlier hackathon submissions:**
-  - [json_cleaning_env](https://huggingface.co/spaces/mrinaalarora/json-cleaning-env)
-  - [DryLabSim](https://huggingface.co/spaces/mrinaalarora/drylabsim)
 
 ## Why this matters
 
