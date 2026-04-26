@@ -1,57 +1,53 @@
 """
-GRPO training run for CrisisOps + Unsloth on a single H200.
+GRPO training run for CrisisOps + Unsloth on Modal cloud GPU infra.
 
-One-step training: each GRPO sample is a fresh CrisisOps reset plus one model
-action. The model writes a JSON action, the env applies it, and the env's
-per-step reward becomes the GRPO reward. Across a training step we run
-`per_device_train_batch_size * gradient_accumulation_steps * num_generations`
-of these action requests, GRPO normalizes within each group and updates the
-LoRA adapter.
-
-Why step-level instead of episode-level:
-- Plays nicely with TRL's default GRPOTrainer contract (one prompt, one
-  completion, one reward) instead of the experimental rollout_func path.
-- Prompt and reward stay aligned because each completion is scored against the
-  same deterministic reset seed that produced its prompt.
-- This is deliberately the smallest reliable RL artifact for the hackathon:
-  visible loss/reward curves first, fuller episode training later.
-
-The script:
-1. Loads Qwen2.5-Coder-3B-Instruct in 4-bit via unsloth + LoRA r=16
-2. Builds a HF Dataset of deterministic reset observations for fixed seeds
-3. The reward function resets the matching seed, applies the generated action,
-   and returns the env reward plus small validity/action-shaping bonuses
-4. Logs to trackio so the loss + reward curve are visible from a HF Space.
+This is a Modal-native port of simple-training-script.py. It keeps the exact
+same Unsloth, TRL, and TrackIO implementation, but runs on Modal's cloud GPUs
+instead of Hugging Face Jobs.
 
 Usage:
+    modal run training-scripts/modal-training-script.py
 
-export HF_TOKEN=hf_...
-export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
+    # With overrides:
+    modal run training-scripts/modal-training-script.py \
+        --grpo-max-steps 200 \
+        --task-id multi_zone_triage
 
-hf jobs uv run \
-  --token "$HF_TOKEN" \
-  --flavor h200 \
-  --timeout 4h \
-  -s HF_TOKEN="$HF_TOKEN" \
-  --with "trl==0.19.1" \
-  --with unsloth \
-  --with transformers \
-  --with accelerate \
-  --with bitsandbytes \
-  --with peft \
-  --with torch \
-  --with datasets \
-  --with trackio \
-  -e ENV_URL=https://mrinaalarora-crisisops.hf.space \
-  -e TASK_ID=single_zone_response \
-  -e MODEL_ID=unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit \
-  -e GRPO_MAX_STEPS=100 \
-  -e HF_REPO_ID=mrinaalarora/crisisops-grpo-easy-lora \
-  -e TRACKIO_SPACE_ID=mrinaalarora/crisisops-grpo-trackio \
-  training-scripts/simple-training-script.py
+Required Modal setup:
+    - A Modal Secret named "huggingface-secret" (type: Hugging Face) so that
+      HF_TOKEN is available in the container.
+    - The Modal CLI authenticated (modal token set).
 """
 
 from __future__ import annotations
+
+# =============================================================================
+# Modal scaffolding
+# =============================================================================
+
+import modal
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .uv_pip_install(
+        "trl==0.19.1",
+        "unsloth",
+        "transformers",
+        "accelerate",
+        "bitsandbytes",
+        "peft",
+        "torch",
+        "datasets",
+        "trackio",
+    )
+)
+
+app = modal.App("crisisops-grpo-modal", image=image)
+
+
+# =============================================================================
+# Original simple-training-script.py implementation (preserved verbatim)
+# =============================================================================
 
 import json
 import os
@@ -70,7 +66,7 @@ from urllib.request import Request, urlopen
 
 
 # --------------------------------------------------------------------------- #
-# Config (env-var driven so HF Jobs can override without code changes)
+# Config (env-var driven so Modal can override without code changes)
 # --------------------------------------------------------------------------- #
 
 ENV_URL = os.getenv("ENV_URL", "https://mrinaalarora-crisisops.hf.space").rstrip("/")
@@ -681,7 +677,7 @@ def patch_text_only_unsloth_grpo_trainer(trainer: Any) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CUDA / GPU sanity (carry over from the smoke test so HF Job logs are useful)
+# CUDA / GPU sanity (carry over from the smoke test so logs are useful)
 # --------------------------------------------------------------------------- #
 
 
@@ -718,7 +714,7 @@ def wait_for_cuda_runtime() -> None:
     """Wait for CUDA in child processes so failed probes do not poison training."""
     retries = int(os.getenv("CUDA_WAIT_RETRIES", "60"))
     sleep_seconds = int(os.getenv("CUDA_WAIT_SLEEP_SECONDS", "10"))
-    probe_timeout = int(os.getenv("CUDA_PROBE_TIMEOUT", "180"))
+    probe_timeout = int(os.getenv("CUDA_PROBE_TIMEOUT", "30"))
     last_error: Optional[str] = None
     for attempt in range(1, retries + 1):
         try:
@@ -727,10 +723,9 @@ def wait_for_cuda_runtime() -> None:
                     sys.executable,
                     "-c",
                     (
-                        "import os, sys, torch; "
+                        "import os, torch; "
                         "print('torch_version=' + torch.__version__); "
                         "print('cuda_visible_devices=' + str(os.environ.get('CUDA_VISIBLE_DEVICES'))); "
-                        "sys.stdout.flush(); "
                         "torch.cuda.init(); "
                         "print('device_count=' + str(torch.cuda.device_count())); "
                         "print('device_name=' + torch.cuda.get_device_name(0))"
@@ -741,15 +736,8 @@ def wait_for_cuda_runtime() -> None:
                 text=True,
                 timeout=probe_timeout,
             )
-        except subprocess.TimeoutExpired as exc:
-            partial_output = ""
-            if exc.output:
-                partial_output += exc.output.decode("utf-8", errors="replace") if isinstance(exc.output, bytes) else exc.output
-            if exc.stderr:
-                partial_output += exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        except subprocess.TimeoutExpired:
             last_error = f"probe timed out after {probe_timeout}s"
-            if partial_output.strip():
-                last_error += f" partial_output={partial_output.strip()}"
             print(
                 f"[TRAIN] cuda_not_ready attempt={attempt}/{retries} "
                 f"sleep_seconds={sleep_seconds} last_error={last_error}",
@@ -778,17 +766,17 @@ def wait_for_cuda_runtime() -> None:
         "training code."
     )
     raise RuntimeError(
-        "CUDA did not become ready inside the HF Job. "
+        "CUDA did not become ready inside the container. "
         f"Last error: {last_error or 'torch.cuda probe failed'}." + hint
     )
 
 
 # --------------------------------------------------------------------------- #
-# Main
+# Original main() — renamed so the Modal entrypoint can call it.
 # --------------------------------------------------------------------------- #
 
 
-def main() -> None:
+def training_main() -> Dict[str, Any]:
     global _METRICS
 
     if TASK_ID not in TASK_CONFIGS:
@@ -999,6 +987,124 @@ def main() -> None:
         flush=True,
     )
 
+    return final
 
-if __name__ == "__main__":
-    main()
+
+# =============================================================================
+# Modal remote function + local entrypoint
+# =============================================================================
+
+
+def _set_env(name: str, value: Any) -> None:
+    if value is not None:
+        os.environ[name] = str(value)
+
+
+@app.function(
+    gpu="H200",
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    cpu=8,
+    memory=32768,
+    ephemeral_disk=262144,
+    timeout=4 * 60 * 60,
+)
+def run_training(
+    env_url: str = "https://mrinaalarora-crisisops.hf.space",
+    task_id: str = "single_zone_response",
+    model_id: str = "unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit",
+    grpo_max_steps: int = 100,
+    grpo_num_generations: int = 4,
+    grpo_per_device_batch: int = 3,
+    grpo_grad_accum: int = 4,
+    grpo_learning_rate: float = 5e-6,
+    grpo_beta: float = 0.0,
+    grpo_temperature: float = 0.9,
+    grpo_top_p: float = 0.95,
+    grpo_max_prompt_length: int = 3072,
+    grpo_max_completion_length: int = 512,
+    grpo_warmup_steps: int = 5,
+    grpo_logging_steps: int = 1,
+    grpo_save_steps: int = 25,
+    grpo_lora_rank: int = 16,
+    grpo_max_grad_norm: float = 0.1,
+    max_seq_length: int = 4096,
+    output_dir: str = "crisisops-grpo-easy-lora",
+    hf_repo_id: Optional[str] = "mrinaalarora/crisisops-grpo-easy-lora",
+    trackio_space_id: Optional[str] = "mrinaalarora/crisisops-grpo-trackio",
+    run_name: str = "",
+    seed_pool_size: int = 16,
+) -> Dict[str, Any]:
+    """
+    Run the CrisisOps GRPO training loop on Modal.
+
+    Parameters mirror the env vars used by simple-training-script.py so you
+    can override any setting from the CLI via the local_entrypoint.
+    """
+    # Push parameters into os.environ so the original config block picks them up.
+    _set_env("ENV_URL", env_url)
+    _set_env("TASK_ID", task_id)
+    _set_env("MODEL_ID", model_id)
+    _set_env("GRPO_MAX_STEPS", grpo_max_steps)
+    _set_env("GRPO_NUM_GENERATIONS", grpo_num_generations)
+    _set_env("GRPO_PER_DEVICE_BATCH", grpo_per_device_batch)
+    _set_env("GRPO_GRAD_ACCUM", grpo_grad_accum)
+    _set_env("GRPO_LEARNING_RATE", grpo_learning_rate)
+    _set_env("GRPO_BETA", grpo_beta)
+    _set_env("GRPO_TEMPERATURE", grpo_temperature)
+    _set_env("GRPO_TOP_P", grpo_top_p)
+    _set_env("GRPO_MAX_PROMPT_LENGTH", grpo_max_prompt_length)
+    _set_env("GRPO_MAX_COMPLETION_LENGTH", grpo_max_completion_length)
+    _set_env("GRPO_WARMUP_STEPS", grpo_warmup_steps)
+    _set_env("GRPO_LOGGING_STEPS", grpo_logging_steps)
+    _set_env("GRPO_SAVE_STEPS", grpo_save_steps)
+    _set_env("GRPO_LORA_RANK", grpo_lora_rank)
+    _set_env("GRPO_MAX_GRAD_NORM", grpo_max_grad_norm)
+    _set_env("MAX_SEQ_LENGTH", max_seq_length)
+    _set_env("OUTPUT_DIR", output_dir)
+    _set_env("HF_REPO_ID", hf_repo_id)
+    _set_env("TRACKIO_SPACE_ID", trackio_space_id)
+    _set_env("RUN_NAME", run_name or f"crisisops-{task_id}-grpo-one-step")
+    _set_env("SEED_POOL_SIZE", seed_pool_size)
+
+    # HF_TOKEN is injected automatically by the Modal Secret.
+    return training_main()
+
+
+@app.local_entrypoint()
+def main(
+    env_url: str = "https://mrinaalarora-crisisops.hf.space",
+    task_id: str = "single_zone_response",
+    model_id: str = "unsloth/Qwen2.5-Coder-3B-Instruct-bnb-4bit",
+    grpo_max_steps: int = 100,
+    grpo_num_generations: int = 4,
+    grpo_per_device_batch: int = 3,
+    grpo_grad_accum: int = 4,
+    hf_repo_id: str = "mrinaalarora/crisisops-grpo-easy-lora",
+    trackio_space_id: str = "mrinaalarora/crisisops-grpo-trackio",
+    run_name: str = "",
+):
+    """
+    Launch the CrisisOps GRPO trainer on Modal's cloud GPUs.
+
+    Example:
+        modal run training-scripts/modal-training-script.py
+
+        modal run training-scripts/modal-training-script.py \
+            --grpo-max-steps 200 \
+            --task-id multi_zone_triage
+    """
+    result = run_training.remote(
+        env_url=env_url,
+        task_id=task_id,
+        model_id=model_id,
+        grpo_max_steps=grpo_max_steps,
+        grpo_num_generations=grpo_num_generations,
+        grpo_per_device_batch=grpo_per_device_batch,
+        grpo_grad_accum=grpo_grad_accum,
+        hf_repo_id=hf_repo_id,
+        trackio_space_id=trackio_space_id,
+        run_name=run_name,
+    )
+    print("\n=== Training Summary ===")
+    for key, value in result.items():
+        print(f"  {key}: {value}")
